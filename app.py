@@ -133,9 +133,6 @@ def load_from_gsheet(client):
         else:
             return None, None
     except gspread.exceptions.WorksheetNotFound:
-        # Buat worksheet baru jika belum ada
-        sheet = client.open_by_key(GOOGLE_SHEET_ID)
-        worksheet = sheet.add_worksheet(title=SHEET_NAME, rows=1000, cols=50)
         return None, None
     except Exception as e:
         st.warning(f"⚠️ Gagal load dari Google Sheets: {str(e)}")
@@ -213,43 +210,38 @@ def save_to_gsheet(client, df):
             worksheet = sheet.worksheet(SHEET_NAME)
             worksheet.clear()  # Hapus data lama
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = sheet.add_worksheet(title=SHEET_NAME, rows=1000, cols=50)
+            worksheet = sheet.add_worksheet(title=SHEET_NAME, rows=max(1000, len(df)+10), cols=max(30, len(df.columns)+5))
         
         # Update timestamp di cell A1
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         worksheet.update('A1', f'Last Updated: {timestamp}', value_input_option='USER_ENTERED')
         
         # Konversi DataFrame ke list of lists
-        # Ganti NaN dengan string kosong
+        # Ganti NaN dengan string kosong dan konversi semua ke string
         df_clean = df.fillna('')
-        
-        # Konversi semua kolom ke string untuk menghindari masalah tipe data
         headers = df_clean.columns.tolist()
         data = [headers]
         
         for _, row in df_clean.iterrows():
-            row_list = [str(val) if val != '' else '' for val in row.tolist()]
+            row_list = []
+            for val in row.tolist():
+                if pd.isna(val) or val == '':
+                    row_list.append('')
+                else:
+                    row_list.append(str(val))
             data.append(row_list)
         
         # Update worksheet mulai dari A2
-        # Gunakan range yang spesifik untuk menghindari error
-        end_col = gspread.utils.rowcol_to_a1(1, len(headers))[0]
-        range_name = f'A2:{end_col}{len(data) + 1}'
-        
-        worksheet.update(range_name, data, value_input_option='USER_ENTERED')
+        if data:
+            worksheet.update('A2', data, value_input_option='USER_ENTERED')
         
         # Format header (bold)
-        header_range = f'A2:{end_col}2'
-        worksheet.format(header_range, {
-            "textFormat": {"bold": True}
-        })
-        
-        # Resize kolom otomatis (opsional)
-        try:
-            # Tidak semua versi gspread mendukung auto_resize
-            pass
-        except:
-            pass
+        if headers:
+            end_col_letter = chr(65 + min(len(headers), 26) - 1) if len(headers) <= 26 else 'Z'
+            header_range = f'A2:{end_col_letter}2'
+            worksheet.format(header_range, {
+                "textFormat": {"bold": True}
+            })
         
         return True, timestamp
     except Exception as e:
@@ -446,7 +438,7 @@ elif action == "💾 Simpan ke Google Sheets":
                     if success:
                         st.success(f"✅ Data berhasil disimpan ke Google Sheets!")
                         st.info(f"🕒 Last Updated: {timestamp}")
-                        st.markdown(f"[📊 Lihat Hasil di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit#gid=0)")
+                        st.markdown(f"[📊 Lihat Hasil di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
                         
                         st.session_state.last_update = timestamp
                     else:
@@ -454,6 +446,10 @@ elif action == "💾 Simpan ke Google Sheets":
                         
                 except Exception as e:
                     st.error(f"❌ Gagal menyimpan ke Google Sheets: {str(e)}")
+                    
+                    # Tampilkan detail error untuk debugging
+                    with st.expander("Detail Error"):
+                        st.code(str(e))
                     
                     # Fallback download
                     st.warning("Silakan download manual sebagai alternatif:")
