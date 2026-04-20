@@ -213,27 +213,43 @@ def save_to_gsheet(client, df):
             worksheet = sheet.worksheet(SHEET_NAME)
             worksheet.clear()  # Hapus data lama
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = sheet.add_worksheet(title=SHEET_NAME, rows=len(df)+10, cols=len(df.columns)+5)
+            worksheet = sheet.add_worksheet(title=SHEET_NAME, rows=1000, cols=50)
         
-        # Update header dengan timestamp
+        # Update timestamp di cell A1
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        worksheet.update('A1', f'Last Updated: {timestamp}')
-        
-        # Siapkan data untuk diupload
-        # Gspread punya batasan ukuran, jadi kita upload per batch jika perlu
+        worksheet.update('A1', f'Last Updated: {timestamp}', value_input_option='USER_ENTERED')
         
         # Konversi DataFrame ke list of lists
-        headers = df.columns.tolist()
-        data = [headers] + df.fillna('').values.tolist()
+        # Ganti NaN dengan string kosong
+        df_clean = df.fillna('')
         
-        # Update worksheet
-        worksheet.update('A2', data)
+        # Konversi semua kolom ke string untuk menghindari masalah tipe data
+        headers = df_clean.columns.tolist()
+        data = [headers]
         
-        # Format header
-        worksheet.format('A2:Z2', {
-            "textFormat": {"bold": True},
-            "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2}
+        for _, row in df_clean.iterrows():
+            row_list = [str(val) if val != '' else '' for val in row.tolist()]
+            data.append(row_list)
+        
+        # Update worksheet mulai dari A2
+        # Gunakan range yang spesifik untuk menghindari error
+        end_col = gspread.utils.rowcol_to_a1(1, len(headers))[0]
+        range_name = f'A2:{end_col}{len(data) + 1}'
+        
+        worksheet.update(range_name, data, value_input_option='USER_ENTERED')
+        
+        # Format header (bold)
+        header_range = f'A2:{end_col}2'
+        worksheet.format(header_range, {
+            "textFormat": {"bold": True}
         })
+        
+        # Resize kolom otomatis (opsional)
+        try:
+            # Tidak semua versi gspread mendukung auto_resize
+            pass
+        except:
+            pass
         
         return True, timestamp
     except Exception as e:
