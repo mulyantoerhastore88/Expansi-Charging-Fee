@@ -85,7 +85,10 @@ def process_excel(file_bytes, store_name, file_name):
         if df.empty:
             return pd.DataFrame()
         
-        df['Store'] = store_name
+        # Gunakan nama tampilan jika ada, jika tidak gunakan nama asli
+        display_name = STORE_DISPLAY_NAMES.get(store_name, store_name)
+        
+        df['Store'] = display_name
         df['Source File'] = file_name
         
         if 'Waktu Periode Dimulai' in df.columns:
@@ -93,7 +96,7 @@ def process_excel(file_bytes, store_name, file_name):
         
         return df
     except Exception as e:
-        st.warning(f"⚠️ Error processing {store_name}/{file_name}: {str(e)}")
+        st.warning(f"⚠️ Error processing {display_name}/{file_name}: {str(e)}")
         return pd.DataFrame()
 
 def load_from_gsheet(client):
