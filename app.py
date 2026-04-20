@@ -432,29 +432,85 @@ elif action == "💾 Simpan ke Drive (CSV)":
     else:
         df = st.session_state.compiled_df
         st.info(f"📊 Data yang akan disimpan: **{len(df):,} baris**, **{df['Store'].nunique()} store**")
-        
         st.text(f"📁 Lokasi: Folder ID `{OUTPUT_FOLDER_ID}`")
         st.text(f"📄 Nama file: `{MASTER_FILENAME}`")
         
         if st.button("📤 Simpan ke Google Drive", type="primary", use_container_width=True):
             with st.spinner("🔄 Menyimpan file ke Google Drive..."):
                 try:
-                    file_id, is_update = save_master_csv(service, df)
+                    # Konversi DataFrame ke CSV
+                    csv_buffer = io.StringIO()
+                    df.to_csv(csv_buffer, index=False)
+                    csv_bytes = io.BytesIO(csv_buffer.getvalue().encode('utf-8'))
+                    
+                    # Step 1: Upload ke root Drive Service Account
+                    file_metadata = {
+                        'name': MASTER_FILENAME,
+                        'mimeType': 'text/csv'
+                    }
+                    
+                    media = MediaIoBaseUpload(
+                        csv_bytes,
+                        mimetype='text/csv',
+                        resumable=True
+                    )
+                    
+                    new_file = service.files().create(
+                        body=file_metadata,
+                        media_body=media,
+                        fields='id, name'
+                    ).execute()
+                    
+                    new_file_id = new_file['id']
+                    
+                    # Step 2: Cek file lama di folder tujuan
+                    query = f"name='{MASTER_FILENAME}' and '{OUTPUT_FOLDER_ID}' in parents and trashed=false"
+                    results = service.files().list(q=query, fields="files(id)").execute()
+                    existing_files = results.get('files', [])
+                    
+                    is_update = len(existing_files) > 0
+                    
+                    # Step 3: Pindahkan file baru ke folder tujuan
+                    service.files().update(
+                        fileId=new_file_id,
+                        addParents=OUTPUT_FOLDER_ID,
+                        removeParents='root',
+                        fields='id, parents'
+                    ).execute()
+                    
+                    # Step 4: Hapus file lama
+                    for old_file in existing_files:
+                        try:
+                            service.files().delete(fileId=old_file['id']).execute()
+                        except:
+                            pass
                     
                     if is_update:
                         st.success(f"✅ File berhasil di-update!")
                     else:
                         st.success(f"✅ File baru berhasil dibuat!")
                     
-                    st.markdown(f"[📁 Buka di Google Drive](https://drive.google.com/file/d/{file_id}/view)")
-                    
-                    # Tampilkan link folder juga
+                    st.markdown(f"[📁 Buka di Google Drive](https://drive.google.com/file/d/{new_file_id}/view)")
                     st.markdown(f"[📂 Buka Folder Utama](https://drive.google.com/drive/folders/{OUTPUT_FOLDER_ID})")
                     
                     st.session_state.last_update = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     
                 except Exception as e:
                     st.error(f"❌ Gagal menyimpan file: {str(e)}")
+                    st.info("""
+                    **Solusi alternatif jika error berlanjut:**
+                    1. Gunakan Shared Drive (Google Drive bersama)
+                    2. Atau download CSV secara manual dan upload ke Drive
+                    """)
+                    
+                    # Fallback: Tawarkan download manual
+                    csv_download = df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 Download CSV (Manual)",
+                        data=csv_download,
+                        file_name=MASTER_FILENAME,
+                        mime="text/csv"
+                    )
 
 # Footer
 st.sidebar.divider()
