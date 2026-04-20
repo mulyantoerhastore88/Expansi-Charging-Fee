@@ -20,11 +20,11 @@ SCOPES = [
 
 # Folder IDs untuk masing-masing store (sumber data)
 FOLDER_IDS = {
-    "Bali": "1QyrDV3Hp3DDM_hGadpvlyjiDf9qFFj12",
-    "Medan": "1rlaw2zcHmPWxXsNezT0qBrOy4lwJOUla",
-    "Makassar": "1es6yRaVvXGt0Fs06jsx4-pj_UVjWSg-P",
-    "Surabaya": "1WXRqjLiXk5P-BNozr_qgkRM09oRTQR1W",
-    "Semarang": "13T9Wtw9qXaKTj52rsh9kdX-N9JIHCzzC"
+    "Shopee Bali": "1QyrDV3Hp3DDM_hGadpvlyjiDf9qFFj12",
+    "Shopee Medan": "1rlaw2zcHmPWxXsNezT0qBrOy4lwJOUla",
+    "Shopee Makassar": "1es6yRaVvXGt0Fs06jsx4-pj_UVjWSg-P",
+    "Shopee Surabaya": "1WXRqjLiXk5P-BNozr_qgkRM09oRTQR1W",
+    "Shopee Semarang": "13T9Wtw9qXaKTj52rsh9kdX-N9JIHCzzC"
 }
 
 # Google Sheets Config
