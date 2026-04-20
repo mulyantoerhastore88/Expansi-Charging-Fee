@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import io
-import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
@@ -13,9 +12,8 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 st.set_page_config(page_title="Shopee Charging Report", layout="wide", page_icon="📊")
 
 # ==========================================
-# KONFIGURASI ID FOLDER GDRIVE (HARAP DIGANTI)
+# KONFIGURASI ID FOLDER GDRIVE
 # ==========================================
-# Ambil ID dari URL folder gdrive, contoh: https://drive.google.com/drive/folders/1A2B3C4D... -> ID nya adalah 1A2B3C4D...
 FOLDER_IDS = {
     "Bali": "1QyrDV3Hp3DDM_hGadpvlyjiDf9qFFj12",
     "Medan": "1rlaw2zcHmPWxXsNezT0qBrOy4lwJOUla",
@@ -23,8 +21,10 @@ FOLDER_IDS = {
     "Surabaya": "1WXRqjLiXk5P-BNozr_qgkRM09oRTQR1W",
     "Semarang": "13T9Wtw9qXaKTj52rsh9kdX-N9JIHCzzC"
 }
-OUTPUT_FOLDER_ID = "1FpQqUnBznK5OaNm6KQmBOhta7PKQu6Zt" # Folder tempat menaruh file gabungan
-MASTER_FILENAME = "Master_Charging_Report.xlsx"
+OUTPUT_FOLDER_ID = "1FpQqUnBznK5OaNm6KQmBOhta7PKQu6Zt" 
+
+# OPTIMASI: Menggunakan format CSV agar proses baca/tulis jauh lebih cepat
+MASTER_FILENAME = "Master_Charging_Report.csv"
 
 # ==========================================
 # FUNGSI AUTENTIKASI GDRIVE
@@ -56,55 +56,59 @@ def run_etl_process():
         current_step += 1
         my_bar.progress(current_step / (total_folders + 1), text=f"Mengambil data Cabang {store_name}...")
         
-        # Cari file xlsx di dalam folder
+        # Cari file laporan mentah (format xlsx)
         query = f"'{folder_id}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
         results = drive_service.files().list(q=query, fields="files(id, name)").execute()
         items = results.get('files', [])
         
         for item in items:
             file_id = item['id']
-            # Download file
+            # Download file mentah
             request = drive_service.files().get_media(fileId=file_id)
             downloaded = io.BytesIO()
-            downloader = MediaIoBaseDownload(downloaded, request)
+            
+            # OPTIMASI: Chunksize 10MB untuk mempercepat download
+            downloader = MediaIoBaseDownload(downloaded, request, chunksize=1024*1024*10)
             done = False
             while done is False:
                 status, done = downloader.next_chunk()
             
-            # Baca Excel
+            # Baca Excel file mentah
             downloaded.seek(0)
             try:
+                # Hanya ambil sheet Summary
                 df = pd.read_excel(downloaded, sheet_name='Charging Report Summary', engine='openpyxl')
                 # Transformasi: Tambah Nama Store dan Periode
                 df['Store'] = store_name
                 df['Waktu Periode Dimulai'] = pd.to_datetime(df['Waktu Periode Dimulai'], errors='coerce')
-                # Format penamaan periode: 'April 2025'
                 df['Periode Charging'] = df['Waktu Periode Dimulai'].dt.strftime('%B %Y')
                 all_data.append(df)
             except Exception as e:
-                st.warning(f"Gagal membaca sheet 'Charging Report Summary' di file {item['name']}: {e}")
+                # Abaikan jika ada error pembacaan sheet (misal file bukan format yang diharapkan)
+                pass
 
     if not all_data:
         st.error("Tidak ada data yang berhasil diekstrak!")
         my_bar.empty()
         return False
 
-    my_bar.progress(0.9, text="Menggabungkan dan menyimpan Master Data ke GDrive...")
+    my_bar.progress(0.9, text="Menggabungkan dan menyimpan Master Data (CSV) ke GDrive...")
     
     # Gabungkan semua data
     master_df = pd.concat(all_data, ignore_index=True)
     
-    # 2. Load (Simpan ke Gdrive)
+    # 2. Load (Simpan ke Gdrive sebagai CSV)
     output_bytes = io.BytesIO()
-    master_df.to_excel(output_bytes, index=False, engine='openpyxl')
+    master_df.to_csv(output_bytes, index=False)
     output_bytes.seek(0)
     
-    # Cek apakah file master sudah ada sebelumnya di folder output
+    # Cek apakah file master csv sudah ada sebelumnya di folder output
     query = f"'{OUTPUT_FOLDER_ID}' in parents and name='{MASTER_FILENAME}' and trashed=false"
     res = drive_service.files().list(q=query, fields="files(id)").execute()
     existing_files = res.get('files', [])
     
-    media = MediaIoBaseUpload(output_bytes, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', resumable=True)
+    # Pastikan mimetype di set text/csv
+    media = MediaIoBaseUpload(output_bytes, mimetype='text/csv', resumable=True)
     
     if existing_files:
         # Update file existing
@@ -120,9 +124,9 @@ def run_etl_process():
     return True
 
 # ==========================================
-# FUNGSI MEMBACA MASTER DATA UNTUK DASHBOARD
+# FUNGSI MEMBACA MASTER DATA (CSV) UNTUK DASHBOARD
 # ==========================================
-@st.cache_data(ttl=3600) # Cache 1 Jam agar tidak berat
+@st.cache_data(ttl=3600) # Cache 1 Jam
 def load_master_data():
     drive_service = get_gdrive_service()
     query = f"'{OUTPUT_FOLDER_ID}' in parents and name='{MASTER_FILENAME}' and trashed=false"
@@ -135,13 +139,16 @@ def load_master_data():
     file_id = items[0]['id']
     request = drive_service.files().get_media(fileId=file_id)
     downloaded = io.BytesIO()
-    downloader = MediaIoBaseDownload(downloaded, request)
+    
+    # OPTIMASI: Chunksize 10MB
+    downloader = MediaIoBaseDownload(downloaded, request, chunksize=1024*1024*10)
     done = False
     while done is False:
         _, done = downloader.next_chunk()
         
     downloaded.seek(0)
-    df = pd.read_excel(downloaded, engine='openpyxl')
+    # OPTIMASI: Baca sebagai CSV
+    df = pd.read_csv(downloaded)
     return df
 
 # ==========================================
@@ -167,12 +174,12 @@ st.markdown("---")
 df = load_master_data()
 
 if df.empty:
-    st.info("⚠️ Data Master belum tersedia. Silakan klik tombol 'Tarik & Update Data GDrive' di pojok kanan atas untuk pertama kali.")
+    st.info("⚠️ Data Master belum tersedia. Silakan klik tombol 'Tarik & Update Data GDrive' di pojok kanan atas untuk menarik data pertama kali.")
 else:
     # SIDEBAR FILTER
     st.sidebar.header("🔍 Filter Data")
     
-    # Handle jika ada data yg kosong/NaN di periode
+    # Handle list filter (hilangkan NaN jika ada)
     periode_list = [p for p in df['Periode Charging'].dropna().unique()]
     store_list = [s for s in df['Store'].dropna().unique()]
 
