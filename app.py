@@ -14,7 +14,7 @@ st.title("📊 Shopee Charging Report Dashboard")
 # Google Drive Setup
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
-# Folder IDs untuk masing-masing store
+# Folder IDs untuk masing-masing store (sumber data)
 FOLDER_IDS = {
     "Bali": "1QyrDV3Hp3DDM_hGadpvlyjiDf9qFFj12",
     "Medan": "1rlaw2zcHmPWxXsNezT0qBrOy4lwJOUla",
@@ -23,7 +23,7 @@ FOLDER_IDS = {
     "Semarang": "13T9Wtw9qXaKTj52rsh9kdX-N9JIHCzzC"
 }
 
-# Folder output untuk menyimpan file hasil compile
+# Folder output (folder utama yang sama dengan folder sumber)
 OUTPUT_FOLDER_ID = "1FpQqUnBznK5OaNm6KQmBOhta7PKQu6Zt"
 MASTER_FILENAME = "Master_Charging_Report.csv"
 
@@ -45,11 +45,17 @@ def get_drive_service():
 def list_excel_files_in_folder(service, folder_id):
     """List semua file Excel (.xlsx) di dalam folder."""
     query = f"'{folder_id}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
-    results = service.files().list(q=query, fields="files(id, name)", pageSize=1000).execute()
+    results = service.files().list(
+        q=query,
+        fields="files(id, name)",
+        pageSize=1000,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute()
     return results.get('files', [])
 
-def download_excel(service, file_id):
-    """Download Excel file from Google Drive and return as BytesIO."""
+def download_file(service, file_id):
+    """Download file from Google Drive and return as BytesIO."""
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
@@ -62,20 +68,15 @@ def download_excel(service, file_id):
 def process_excel(file_bytes, store_name, file_name):
     """Extract data from 'Charging Report Summary' sheet."""
     try:
-        # Baca sheet Charging Report Summary
         df = pd.read_excel(file_bytes, sheet_name='Charging Report Summary', header=0)
-        
-        # Filter hanya data row (CRT ID tidak null)
         df = df[df['CRT ID'].notna()]
         
         if df.empty:
             return pd.DataFrame()
         
-        # Tambah kolom informasi
         df['Store'] = store_name
         df['Source File'] = file_name
         
-        # Parse periode dari Waktu Periode Dimulai
         if 'Waktu Periode Dimulai' in df.columns:
             df['Periode'] = pd.to_datetime(df['Waktu Periode Dimulai']).dt.to_period('M').astype(str)
         
@@ -87,38 +88,39 @@ def process_excel(file_bytes, store_name, file_name):
 def load_master_csv(service):
     """Cek apakah Master CSV sudah ada di Drive, jika ada load sebagai DataFrame."""
     query = f"name='{MASTER_FILENAME}' and '{OUTPUT_FOLDER_ID}' in parents and trashed=false"
-    results = service.files().list(q=query, fields="files(id, name, modifiedTime)").execute()
+    results = service.files().list(
+        q=query,
+        fields="files(id, name, modifiedTime)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute()
+    
     files = results.get('files', [])
     
     if files:
         file_id = files[0]['id']
-        file_bytes = download_excel(service, file_id)
+        file_bytes = download_file(service, file_id)
         modified_time = files[0]['modifiedTime']
         
-        # Coba beberapa encoding
         encodings_to_try = ['utf-8', 'utf-8-sig', 'latin1', 'iso-8859-1', 'cp1252']
         
         for encoding in encodings_to_try:
             try:
-                file_bytes.seek(0)  # Reset pointer
+                file_bytes.seek(0)
                 df = pd.read_csv(file_bytes, encoding=encoding)
                 return df, modified_time
             except UnicodeDecodeError:
                 continue
-            except Exception as e:
+            except Exception:
                 continue
         
-        # Jika semua encoding gagal
-        st.error("❌ Gagal membaca file CSV dengan semua encoding yang dicoba.")
+        st.error("❌ Gagal membaca file CSV.")
         return None, None
     
     return None, None
 
 def compile_all_reports(service, force_refresh=False):
-    """
-    Baca semua file dari semua store, compile menjadi satu DataFrame.
-    Jika force_refresh=False dan master CSV sudah ada, gunakan cache.
-    """
+    """Baca semua file dari semua store, compile menjadi satu DataFrame."""
     if not force_refresh:
         cached_df, modified_time = load_master_csv(service)
         if cached_df is not None:
@@ -129,28 +131,25 @@ def compile_all_reports(service, force_refresh=False):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    total_stores = len(FOLDER_IDS)
     total_files = 0
     processed_files = 0
     
-    # Hitung total file dulu untuk progress
     for store_name, folder_id in FOLDER_IDS.items():
         files = list_excel_files_in_folder(service, folder_id)
         total_files += len(files)
     
     if total_files == 0:
-        status_text.text("⚠️ Tidak ada file Excel ditemukan di folder manapun.")
+        status_text.text("⚠️ Tidak ada file Excel ditemukan.")
         progress_bar.empty()
         return pd.DataFrame(), None
     
-    for idx, (store_name, folder_id) in enumerate(FOLDER_IDS.items()):
+    for store_name, folder_id in FOLDER_IDS.items():
         status_text.text(f"📂 Memproses store: {store_name}...")
-        
         files = list_excel_files_in_folder(service, folder_id)
         
         for file in files:
             try:
-                file_bytes = download_excel(service, file['id'])
+                file_bytes = download_file(service, file['id'])
                 df = process_excel(file_bytes, store_name, file['name'])
                 if not df.empty:
                     all_data.append(df)
@@ -160,13 +159,12 @@ def compile_all_reports(service, force_refresh=False):
             processed_files += 1
             progress_bar.progress(processed_files / total_files)
     
-    status_text.text(f"✅ Selesai memproses {total_files} file dari {total_stores} store!")
+    status_text.text(f"✅ Selesai memproses {total_files} file!")
     progress_bar.empty()
     
     if all_data:
         compiled_df = pd.concat(all_data, ignore_index=True)
         
-        # Konversi kolom numerik ke tipe yang sesuai
         numeric_columns = [
             'Total Order Sold Qty', 'Total MTSKU Sold Qty', 'Total sebelum Pajak', 'Pajak',
             'Total setelah Pajak', 'Amount after tax (Confirmed)', 'Commission Fees',
@@ -185,56 +183,65 @@ def compile_all_reports(service, force_refresh=False):
 
 def save_master_csv(service, df):
     """
-    Simpan DataFrame sebagai CSV ke Google Drive.
+    Simpan DataFrame sebagai CSV ke folder yang sudah di-share.
+    File akan menggunakan quota storage pemilik folder (Anda).
     """
-    # Konversi DataFrame ke CSV dengan encoding utf-8-sig
+    # Konversi DataFrame ke CSV
     csv_buffer = io.StringIO()
     df.to_csv(csv_buffer, index=False)
     csv_bytes = io.BytesIO(csv_buffer.getvalue().encode('utf-8-sig'))
     
-    # Step 1: Upload ke root Drive Service Account
-    file_metadata = {
-        'name': MASTER_FILENAME,
-        'mimeType': 'text/csv'
-    }
-    
-    media = MediaIoBaseUpload(
-        csv_bytes,
-        mimetype='text/csv',
-        resumable=True
-    )
-    
-    new_file = service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields='id, name'
+    # Cek apakah file sudah ada di folder tujuan
+    query = f"name='{MASTER_FILENAME}' and '{OUTPUT_FOLDER_ID}' in parents and trashed=false"
+    results = service.files().list(
+        q=query,
+        fields="files(id)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
     ).execute()
     
-    new_file_id = new_file['id']
-    
-    # Step 2: Cek apakah ada file lama di folder tujuan
-    query = f"name='{MASTER_FILENAME}' and '{OUTPUT_FOLDER_ID}' in parents and trashed=false"
-    results = service.files().list(q=query, fields="files(id)").execute()
     existing_files = results.get('files', [])
-    
     is_update = len(existing_files) > 0
     
-    # Step 3: Pindahkan file baru ke folder tujuan
-    service.files().update(
-        fileId=new_file_id,
-        addParents=OUTPUT_FOLDER_ID,
-        removeParents='root',
-        fields='id, parents'
-    ).execute()
-    
-    # Step 4: Hapus file lama jika ada
-    for old_file in existing_files:
-        try:
-            service.files().delete(fileId=old_file['id']).execute()
-        except Exception:
-            pass
-    
-    return new_file_id, is_update
+    if existing_files:
+        # Update file existing
+        file_id = existing_files[0]['id']
+        
+        media = MediaIoBaseUpload(
+            csv_bytes,
+            mimetype='text/csv',
+            resumable=True
+        )
+        
+        service.files().update(
+            fileId=file_id,
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
+        
+        return file_id, is_update
+    else:
+        # Buat file baru langsung di folder tujuan
+        file_metadata = {
+            'name': MASTER_FILENAME,
+            'parents': [OUTPUT_FOLDER_ID],
+            'mimeType': 'text/csv'
+        }
+        
+        media = MediaIoBaseUpload(
+            csv_bytes,
+            mimetype='text/csv',
+            resumable=True
+        )
+        
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id',
+            supportsAllDrives=True
+        ).execute()
+        
+        return file.get('id'), is_update
 
 def format_rupiah(value):
     """Format angka ke format Rupiah."""
@@ -244,7 +251,6 @@ def format_rupiah(value):
         return "Rp 0"
 
 # -------------------- MAIN APP --------------------
-# Inisialisasi session state
 if 'compiled_df' not in st.session_state:
     st.session_state.compiled_df = None
 if 'last_update' not in st.session_state:
@@ -281,11 +287,9 @@ if action == "📥 Load & Compile Data":
                 
                 st.success(f"✅ Berhasil compile {len(compiled_df):,} baris data!")
                 
-                # Preview data
                 st.subheader("📋 Preview Data Hasil Compile")
                 st.dataframe(compiled_df.head(10), use_container_width=True)
                 
-                # Metrics ringkasan
                 st.subheader("📊 Ringkasan Dataset")
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
@@ -298,7 +302,6 @@ if action == "📥 Load & Compile Data":
                     if 'Periode' in compiled_df.columns:
                         st.metric("Periode", ", ".join(compiled_df['Periode'].unique()))
                 
-                # Tampilkan summary per store
                 st.subheader("🏪 Data per Store")
                 store_summary = compiled_df.groupby('Store').agg({
                     'Total setelah Pajak': 'sum',
@@ -311,10 +314,8 @@ if action == "📥 Load & Compile Data":
                 store_summary['Settlement Amount'] = store_summary['Settlement Amount'].apply(format_rupiah)
                 
                 st.dataframe(store_summary, use_container_width=True)
-                
             else:
                 st.warning("⚠️ Tidak ada data yang berhasil di-compile.")
-                st.info("Pastikan ada file Excel di folder-folder store yang sudah ditentukan.")
 
 # -------------------- DASHBOARD --------------------
 elif action == "📊 Lihat Dashboard":
@@ -332,7 +333,6 @@ elif action == "📊 Lihat Dashboard":
     
     df = st.session_state.compiled_df.copy()
     
-    # Sidebar Filters
     st.sidebar.subheader("🔍 Filter Data")
     
     stores = st.sidebar.multiselect(
@@ -357,7 +357,7 @@ elif action == "📊 Lihat Dashboard":
     
     st.caption(f"Menampilkan {len(df_filtered):,} baris data")
     
-    # Metrics Cards
+    # Metrics
     st.subheader("💰 Ringkasan Keuangan")
     col1, col2, col3, col4 = st.columns(4)
     
@@ -377,92 +377,25 @@ elif action == "📊 Lihat Dashboard":
         total_orders = df_filtered['Total Order Sold Qty'].sum() if 'Total Order Sold Qty' in df_filtered.columns else 0
         st.metric("Total Order", f"{total_orders:,.0f}")
     
-    # Charts Row 1
+    # Charts
     st.subheader("📈 Analisis per Store")
     col1, col2 = st.columns(2)
     
     with col1:
         if 'Total setelah Pajak' in df_filtered.columns:
             store_total = df_filtered.groupby('Store')['Total setelah Pajak'].sum().reset_index()
-            fig1 = px.bar(
-                store_total,
-                x='Store',
-                y='Total setelah Pajak',
-                title="Total Setelah Pajak per Store",
-                color='Store',
-                text_auto='.2s'
-            )
+            fig1 = px.bar(store_total, x='Store', y='Total setelah Pajak', title="Total Setelah Pajak per Store", color='Store', text_auto='.2s')
             fig1.update_layout(showlegend=False)
             st.plotly_chart(fig1, use_container_width=True)
     
     with col2:
         if 'Settlement Amount' in df_filtered.columns:
             store_settlement = df_filtered.groupby('Store')['Settlement Amount'].sum().reset_index()
-            fig2 = px.bar(
-                store_settlement,
-                x='Store',
-                y='Settlement Amount',
-                title="Settlement Amount per Store",
-                color='Store',
-                text_auto='.2s'
-            )
+            fig2 = px.bar(store_settlement, x='Store', y='Settlement Amount', title="Settlement Amount per Store", color='Store', text_auto='.2s')
             fig2.update_layout(showlegend=False)
             st.plotly_chart(fig2, use_container_width=True)
     
-    # Charts Row 2
-    st.subheader("🥧 Komposisi & Proporsi")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        fee_data = {'Jenis Biaya': [], 'Nilai': []}
-        
-        fee_mapping = {
-            'Commission': 'Commission Fees (Confirmed)',
-            'Storage': 'Storage Fees (Confirmed)',
-            'Logistics': 'Logistics Fees (Confirmed)',
-            'Warehouse': 'Warehouse Handling Fees (Confirmed)',
-            'Inbound Penalty': 'Inbound Penalty Fees (Confirmed)',
-            'Other': 'Other Fees (Confirmed)'
-        }
-        
-        for label, col_name in fee_mapping.items():
-            if col_name in df_filtered.columns:
-                val = df_filtered[col_name].sum()
-                if val > 0:
-                    fee_data['Jenis Biaya'].append(label)
-                    fee_data['Nilai'].append(val)
-        
-        if fee_data['Nilai']:
-            fee_df = pd.DataFrame(fee_data)
-            fig3 = px.pie(fee_df, values='Nilai', names='Jenis Biaya', title="Komposisi Biaya (Confirmed)")
-            st.plotly_chart(fig3, use_container_width=True)
-        else:
-            st.info("Tidak ada data biaya")
-    
-    with col2:
-        if 'Total Order Sold Qty' in df_filtered.columns:
-            order_per_store = df_filtered.groupby('Store')['Total Order Sold Qty'].sum().reset_index()
-            fig4 = px.pie(order_per_store, values='Total Order Sold Qty', names='Store', title="Proporsi Order per Store")
-            st.plotly_chart(fig4, use_container_width=True)
-        else:
-            st.info("Data Order tidak tersedia")
-    
-    # Tabel Detail
-    st.subheader("📋 Data Detail")
-    
-    display_columns = [
-        'Store', 'ID Toko', 'Waktu Periode Dimulai', 'Waktu Periode Berakhir',
-        'Total Order Sold Qty', 'Total setelah Pajak', 'Commission Fees (Confirmed)',
-        'Storage Fees (Confirmed)', 'Settlement Amount', 'Source File'
-    ]
-    available_columns = [col for col in display_columns if col in df_filtered.columns]
-    
-    st.dataframe(
-        df_filtered[available_columns].sort_values(['Store', 'Waktu Periode Dimulai']),
-        use_container_width=True,
-        hide_index=True
-    )
-    
+    # Download button
     csv = df_filtered.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
         label="📥 Download Data Filtered (CSV)",
@@ -499,9 +432,20 @@ elif action == "💾 Simpan ke Drive (CSV)":
                     st.session_state.last_update = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     
                 except Exception as e:
-                    st.error(f"❌ Gagal menyimpan file: {str(e)}")
-                    st.info("**Solusi alternatif:** Download file CSV secara manual.")
+                    error_msg = str(e)
+                    st.error(f"❌ Gagal menyimpan file: {error_msg}")
                     
+                    # Cek apakah error karena quota
+                    if "storageQuotaExceeded" in error_msg or "storage quota" in error_msg.lower():
+                        st.warning("""
+                        **Service Account tidak memiliki storage quota.**
+                        
+                        Solusi:
+                        1. Pastikan folder tujuan sudah di-**share ke Service Account** dengan akses **Editor**
+                        2. Atau download manual menggunakan tombol di bawah
+                        """)
+                    
+                    # Fallback download
                     csv_download = df.to_csv(index=False).encode('utf-8-sig')
                     st.download_button(
                         label="📥 Download CSV (Manual)",
@@ -516,7 +460,3 @@ if st.session_state.last_update:
     st.sidebar.caption(f"🕒 Data terakhir di-load: {st.session_state.last_update}")
 if st.session_state.compiled_df is not None:
     st.sidebar.caption(f"📊 {len(st.session_state.compiled_df):,} baris di memory")
-
-st.sidebar.divider()
-st.sidebar.caption("📌 Sheet yang dibaca: Charging Report Summary")
-st.sidebar.caption(f"📁 Total folder store: {len(FOLDER_IDS)}")
