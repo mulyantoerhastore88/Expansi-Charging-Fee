@@ -93,9 +93,25 @@ def load_master_csv(service):
     if files:
         file_id = files[0]['id']
         file_bytes = download_excel(service, file_id)
-        df = pd.read_csv(file_bytes)
         modified_time = files[0]['modifiedTime']
-        return df, modified_time
+        
+        # Coba beberapa encoding
+        encodings_to_try = ['utf-8', 'utf-8-sig', 'latin1', 'iso-8859-1', 'cp1252']
+        
+        for encoding in encodings_to_try:
+            try:
+                file_bytes.seek(0)  # Reset pointer
+                df = pd.read_csv(file_bytes, encoding=encoding)
+                return df, modified_time
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                continue
+        
+        # Jika semua encoding gagal
+        st.error("❌ Gagal membaca file CSV dengan semua encoding yang dicoba.")
+        return None, None
+    
     return None, None
 
 def compile_all_reports(service, force_refresh=False):
@@ -170,15 +186,11 @@ def compile_all_reports(service, force_refresh=False):
 def save_master_csv(service, df):
     """
     Simpan DataFrame sebagai CSV ke Google Drive.
-    Strategi:
-    1. Upload ke root Drive Service Account (punya quota)
-    2. Pindahkan ke folder tujuan
-    3. Hapus file lama jika ada
     """
-    # Konversi DataFrame ke CSV
+    # Konversi DataFrame ke CSV dengan encoding utf-8-sig
     csv_buffer = io.StringIO()
     df.to_csv(csv_buffer, index=False)
-    csv_bytes = io.BytesIO(csv_buffer.getvalue().encode('utf-8'))
+    csv_bytes = io.BytesIO(csv_buffer.getvalue().encode('utf-8-sig'))
     
     # Step 1: Upload ke root Drive Service Account
     file_metadata = {
@@ -192,7 +204,6 @@ def save_master_csv(service, df):
         resumable=True
     )
     
-    # Upload file baru ke root
     new_file = service.files().create(
         body=file_metadata,
         media_body=media,
@@ -221,7 +232,7 @@ def save_master_csv(service, df):
         try:
             service.files().delete(fileId=old_file['id']).execute()
         except Exception:
-            pass  # Ignore deletion errors
+            pass
     
     return new_file_id, is_update
 
@@ -296,7 +307,6 @@ if action == "📥 Load & Compile Data":
                 }).reset_index()
                 store_summary.columns = ['Store', 'Total Setelah Pajak', 'Settlement Amount', 'Jumlah File']
                 
-                # Format kolom numerik
                 store_summary['Total Setelah Pajak'] = store_summary['Total Setelah Pajak'].apply(format_rupiah)
                 store_summary['Settlement Amount'] = store_summary['Settlement Amount'].apply(format_rupiah)
                 
@@ -310,7 +320,6 @@ if action == "📥 Load & Compile Data":
 elif action == "📊 Lihat Dashboard":
     st.header("📊 Dashboard Charging Report")
     
-    # Cek apakah ada data di session state, jika tidak coba load dari cache
     if st.session_state.compiled_df is None:
         with st.spinner("📦 Mencoba load data dari cache..."):
             compiled_df, cache_time = compile_all_reports(service, force_refresh=False)
@@ -373,7 +382,6 @@ elif action == "📊 Lihat Dashboard":
     col1, col2 = st.columns(2)
     
     with col1:
-        # Total per Store
         if 'Total setelah Pajak' in df_filtered.columns:
             store_total = df_filtered.groupby('Store')['Total setelah Pajak'].sum().reset_index()
             fig1 = px.bar(
@@ -386,11 +394,8 @@ elif action == "📊 Lihat Dashboard":
             )
             fig1.update_layout(showlegend=False)
             st.plotly_chart(fig1, use_container_width=True)
-        else:
-            st.info("Data Total setelah Pajak tidak tersedia")
     
     with col2:
-        # Settlement per Store
         if 'Settlement Amount' in df_filtered.columns:
             store_settlement = df_filtered.groupby('Store')['Settlement Amount'].sum().reset_index()
             fig2 = px.bar(
@@ -403,78 +408,41 @@ elif action == "📊 Lihat Dashboard":
             )
             fig2.update_layout(showlegend=False)
             st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.info("Data Settlement Amount tidak tersedia")
     
     # Charts Row 2
     st.subheader("🥧 Komposisi & Proporsi")
     col1, col2 = st.columns(2)
     
     with col1:
-        # Pie Chart: Komposisi Biaya
-        fee_data = {
-            'Jenis Biaya': [],
-            'Nilai': []
+        fee_data = {'Jenis Biaya': [], 'Nilai': []}
+        
+        fee_mapping = {
+            'Commission': 'Commission Fees (Confirmed)',
+            'Storage': 'Storage Fees (Confirmed)',
+            'Logistics': 'Logistics Fees (Confirmed)',
+            'Warehouse': 'Warehouse Handling Fees (Confirmed)',
+            'Inbound Penalty': 'Inbound Penalty Fees (Confirmed)',
+            'Other': 'Other Fees (Confirmed)'
         }
         
-        if 'Commission Fees (Confirmed)' in df_filtered.columns:
-            val = df_filtered['Commission Fees (Confirmed)'].sum()
-            if val > 0:
-                fee_data['Jenis Biaya'].append('Commission')
-                fee_data['Nilai'].append(val)
-        
-        if 'Storage Fees (Confirmed)' in df_filtered.columns:
-            val = df_filtered['Storage Fees (Confirmed)'].sum()
-            if val > 0:
-                fee_data['Jenis Biaya'].append('Storage')
-                fee_data['Nilai'].append(val)
-        
-        if 'Logistics Fees (Confirmed)' in df_filtered.columns:
-            val = df_filtered['Logistics Fees (Confirmed)'].sum()
-            if val > 0:
-                fee_data['Jenis Biaya'].append('Logistics')
-                fee_data['Nilai'].append(val)
-        
-        if 'Warehouse Handling Fees (Confirmed)' in df_filtered.columns:
-            val = df_filtered['Warehouse Handling Fees (Confirmed)'].sum()
-            if val > 0:
-                fee_data['Jenis Biaya'].append('Warehouse')
-                fee_data['Nilai'].append(val)
-        
-        if 'Inbound Penalty Fees (Confirmed)' in df_filtered.columns:
-            val = df_filtered['Inbound Penalty Fees (Confirmed)'].sum()
-            if val > 0:
-                fee_data['Jenis Biaya'].append('Inbound Penalty')
-                fee_data['Nilai'].append(val)
-        
-        if 'Other Fees (Confirmed)' in df_filtered.columns:
-            val = df_filtered['Other Fees (Confirmed)'].sum()
-            if val > 0:
-                fee_data['Jenis Biaya'].append('Other')
-                fee_data['Nilai'].append(val)
+        for label, col_name in fee_mapping.items():
+            if col_name in df_filtered.columns:
+                val = df_filtered[col_name].sum()
+                if val > 0:
+                    fee_data['Jenis Biaya'].append(label)
+                    fee_data['Nilai'].append(val)
         
         if fee_data['Nilai']:
             fee_df = pd.DataFrame(fee_data)
-            fig3 = px.pie(
-                fee_df,
-                values='Nilai',
-                names='Jenis Biaya',
-                title="Komposisi Biaya (Confirmed)"
-            )
+            fig3 = px.pie(fee_df, values='Nilai', names='Jenis Biaya', title="Komposisi Biaya (Confirmed)")
             st.plotly_chart(fig3, use_container_width=True)
         else:
             st.info("Tidak ada data biaya")
     
     with col2:
-        # Pie Chart: Order per Store
         if 'Total Order Sold Qty' in df_filtered.columns:
             order_per_store = df_filtered.groupby('Store')['Total Order Sold Qty'].sum().reset_index()
-            fig4 = px.pie(
-                order_per_store,
-                values='Total Order Sold Qty',
-                names='Store',
-                title="Proporsi Order per Store"
-            )
+            fig4 = px.pie(order_per_store, values='Total Order Sold Qty', names='Store', title="Proporsi Order per Store")
             st.plotly_chart(fig4, use_container_width=True)
         else:
             st.info("Data Order tidak tersedia")
@@ -482,7 +450,6 @@ elif action == "📊 Lihat Dashboard":
     # Tabel Detail
     st.subheader("📋 Data Detail")
     
-    # Pilih kolom yang akan ditampilkan
     display_columns = [
         'Store', 'ID Toko', 'Waktu Periode Dimulai', 'Waktu Periode Berakhir',
         'Total Order Sold Qty', 'Total setelah Pajak', 'Commission Fees (Confirmed)',
@@ -496,8 +463,7 @@ elif action == "📊 Lihat Dashboard":
         hide_index=True
     )
     
-    # Download button
-    csv = df_filtered.to_csv(index=False).encode('utf-8')
+    csv = df_filtered.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
         label="📥 Download Data Filtered (CSV)",
         data=csv,
@@ -534,14 +500,9 @@ elif action == "💾 Simpan ke Drive (CSV)":
                     
                 except Exception as e:
                     st.error(f"❌ Gagal menyimpan file: {str(e)}")
-                    st.info("""
-                    **Solusi alternatif:**
-                    - Download file CSV secara manual menggunakan tombol di bawah
-                    - Upload manual ke Google Drive
-                    """)
+                    st.info("**Solusi alternatif:** Download file CSV secara manual.")
                     
-                    # Fallback: Tawarkan download manual
-                    csv_download = df.to_csv(index=False).encode('utf-8')
+                    csv_download = df.to_csv(index=False).encode('utf-8-sig')
                     st.download_button(
                         label="📥 Download CSV (Manual)",
                         data=csv_download,
@@ -556,7 +517,6 @@ if st.session_state.last_update:
 if st.session_state.compiled_df is not None:
     st.sidebar.caption(f"📊 {len(st.session_state.compiled_df):,} baris di memory")
 
-# Info tambahan
 st.sidebar.divider()
 st.sidebar.caption("📌 Sheet yang dibaca: Charging Report Summary")
 st.sidebar.caption(f"📁 Total folder store: {len(FOLDER_IDS)}")
