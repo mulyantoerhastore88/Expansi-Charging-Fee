@@ -29,7 +29,7 @@ FOLDER_IDS = {
 
 # Google Sheets Config
 GOOGLE_SHEET_ID = "1KfSLfk9lkTzJhpkEpo98SBGvsi3G0R0GcM_-aWgjSh8"
-SHEET_NAME = "Master_Charging_Report"  # Nama sheet untuk data
+SHEET_NAME = "Master_Charging_Report"
 
 # -------------------- AUTHENTICATION --------------------
 @st.cache_resource
@@ -208,47 +208,41 @@ def save_to_gsheet(client, df):
         # Coba dapatkan worksheet, buat jika belum ada
         try:
             worksheet = sheet.worksheet(SHEET_NAME)
-            worksheet.clear()  # Hapus data lama
+            worksheet.clear()
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = sheet.add_worksheet(title=SHEET_NAME, rows=max(1000, len(df)+10), cols=max(30, len(df.columns)+5))
+            worksheet = sheet.add_worksheet(
+                title=SHEET_NAME,
+                rows=max(1000, len(df)+10),
+                cols=max(30, len(df.columns)+5)
+            )
         
-        # Update timestamp di cell A1
+        # Update timestamp - PERBAIKAN: kirim sebagai list of lists
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        worksheet.update('A1', f'Last Updated: {timestamp}', value_input_option='USER_ENTERED')
+        worksheet.update('A1', [[f'Last Updated: {timestamp}']], value_input_option='USER_ENTERED')
         
-        # Konversi DataFrame ke list of lists
-        # Ganti NaN dengan string kosong dan konversi semua ke string
+        # Siapkan data
         df_clean = df.fillna('')
         headers = df_clean.columns.tolist()
-        data = [headers]
         
+        data = [headers]
         for _, row in df_clean.iterrows():
-            row_list = []
-            for val in row.tolist():
-                if pd.isna(val) or val == '':
-                    row_list.append('')
-                else:
-                    row_list.append(str(val))
+            row_list = [str(val) if str(val) != 'nan' else '' for val in row.tolist()]
             data.append(row_list)
         
-        # Update worksheet mulai dari A2
+        # Update data
         if data:
             worksheet.update('A2', data, value_input_option='USER_ENTERED')
         
-        # Format header (bold)
+        # Format header
         if headers:
             end_col_letter = chr(65 + min(len(headers), 26) - 1) if len(headers) <= 26 else 'Z'
-            header_range = f'A2:{end_col_letter}2'
-            worksheet.format(header_range, {
-                "textFormat": {"bold": True}
-            })
+            worksheet.format(f'A2:{end_col_letter}2', {"textFormat": {"bold": True}})
         
         return True, timestamp
     except Exception as e:
         raise e
 
 def format_rupiah(value):
-    """Format angka ke format Rupiah."""
     try:
         return f"Rp {float(value):,.0f}"
     except:
@@ -260,14 +254,12 @@ if 'compiled_df' not in st.session_state:
 if 'last_update' not in st.session_state:
     st.session_state.last_update = None
 
-# Sidebar
 st.sidebar.header("⚙️ Kontrol")
 action = st.sidebar.radio(
     "📌 Pilih Aksi",
     ["📥 Load & Compile Data", "📊 Lihat Dashboard", "💾 Simpan ke Google Sheets"]
 )
 
-# Authentication
 try:
     service = get_drive_service()
     gsheet_client = get_gsheet_client()
@@ -295,7 +287,6 @@ if action == "📥 Load & Compile Data":
                 st.session_state.last_update = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 
                 st.success(f"✅ Berhasil compile {len(compiled_df):,} baris data!")
-                
                 st.subheader("📋 Preview Data Hasil Compile")
                 st.dataframe(compiled_df.head(10), use_container_width=True)
                 
@@ -366,7 +357,6 @@ elif action == "📊 Lihat Dashboard":
     
     st.caption(f"Menampilkan {len(df_filtered):,} baris data")
     
-    # Metrics
     st.subheader("💰 Ringkasan Keuangan")
     col1, col2, col3, col4 = st.columns(4)
     
@@ -386,7 +376,6 @@ elif action == "📊 Lihat Dashboard":
         total_orders = df_filtered['Total Order Sold Qty'].sum() if 'Total Order Sold Qty' in df_filtered.columns else 0
         st.metric("Total Order", f"{total_orders:,.0f}")
     
-    # Charts
     st.subheader("📈 Analisis per Store")
     col1, col2 = st.columns(2)
     
@@ -404,10 +393,8 @@ elif action == "📊 Lihat Dashboard":
             fig2.update_layout(showlegend=False)
             st.plotly_chart(fig2, use_container_width=True)
     
-    # Link ke Google Sheets
     st.markdown(f"📊 [Buka Data Lengkap di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
     
-    # Download button
     csv = df_filtered.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
         label="📥 Download Data Filtered (CSV)",
@@ -439,19 +426,14 @@ elif action == "💾 Simpan ke Google Sheets":
                         st.success(f"✅ Data berhasil disimpan ke Google Sheets!")
                         st.info(f"🕒 Last Updated: {timestamp}")
                         st.markdown(f"[📊 Lihat Hasil di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
-                        
                         st.session_state.last_update = timestamp
-                    else:
-                        st.error("❌ Gagal menyimpan data.")
                         
                 except Exception as e:
                     st.error(f"❌ Gagal menyimpan ke Google Sheets: {str(e)}")
                     
-                    # Tampilkan detail error untuk debugging
                     with st.expander("Detail Error"):
                         st.code(str(e))
                     
-                    # Fallback download
                     st.warning("Silakan download manual sebagai alternatif:")
                     csv_download = df.to_csv(index=False).encode('utf-8-sig')
                     st.download_button(
