@@ -4,15 +4,19 @@ import plotly.express as px
 import io
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseDownload
 from datetime import datetime
+import gspread
 
 # -------------------- CONFIG --------------------
 st.set_page_config(page_title="Shopee Charging Report Dashboard", layout="wide")
 st.title("📊 Shopee Charging Report Dashboard")
 
-# Google Drive Setup
-SCOPES = ['https://www.googleapis.com/auth/drive']
+# Google Drive & Sheets Setup
+SCOPES = [
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/spreadsheets'
+]
 
 # Folder IDs untuk masing-masing store (sumber data)
 FOLDER_IDS = {
@@ -23,23 +27,30 @@ FOLDER_IDS = {
     "Semarang": "13T9Wtw9qXaKTj52rsh9kdX-N9JIHCzzC"
 }
 
-# Folder output (folder utama yang sama dengan folder sumber)
-OUTPUT_FOLDER_ID = "1FpQqUnBznK5OaNm6KQmBOhta7PKQu6Zt"
-MASTER_FILENAME = "Master_Charging_Report.csv"
+# Google Sheets Config
+GOOGLE_SHEET_ID = "1KfSLfk9lkTzJhpkEpo98SBGvsi3G0R0GcM_-aWgjSh8"
+SHEET_NAME = "Master_Charging_Report"  # Nama sheet untuk data
 
 # -------------------- AUTHENTICATION --------------------
 @st.cache_resource
+def get_credentials():
+    """Get credentials from secrets."""
+    return service_account.Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=SCOPES
+    )
+
+@st.cache_resource
 def get_drive_service():
-    """Authenticate and return Google Drive service using service account."""
-    try:
-        credentials = service_account.Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"],
-            scopes=SCOPES
-        )
-        return build('drive', 'v3', credentials=credentials)
-    except Exception as e:
-        st.error(f"❌ Gagal autentikasi Google Drive: {str(e)}")
-        st.stop()
+    """Authenticate and return Google Drive service."""
+    credentials = get_credentials()
+    return build('drive', 'v3', credentials=credentials)
+
+@st.cache_resource
+def get_gsheet_client():
+    """Authenticate and return gspread client."""
+    credentials = get_credentials()
+    return gspread.authorize(credentials)
 
 # -------------------- HELPER FUNCTIONS --------------------
 def list_excel_files_in_folder(service, folder_id):
@@ -85,46 +96,57 @@ def process_excel(file_bytes, store_name, file_name):
         st.warning(f"⚠️ Error processing {store_name}/{file_name}: {str(e)}")
         return pd.DataFrame()
 
-def load_master_csv(service):
-    """Cek apakah Master CSV sudah ada di Drive, jika ada load sebagai DataFrame."""
-    query = f"name='{MASTER_FILENAME}' and '{OUTPUT_FOLDER_ID}' in parents and trashed=false"
-    results = service.files().list(
-        q=query,
-        fields="files(id, name, modifiedTime)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
-    ).execute()
-    
-    files = results.get('files', [])
-    
-    if files:
-        file_id = files[0]['id']
-        file_bytes = download_file(service, file_id)
-        modified_time = files[0]['modifiedTime']
+def load_from_gsheet(client):
+    """Load data dari Google Sheets."""
+    try:
+        sheet = client.open_by_key(GOOGLE_SHEET_ID)
+        worksheet = sheet.worksheet(SHEET_NAME)
+        data = worksheet.get_all_records()
         
-        encodings_to_try = ['utf-8', 'utf-8-sig', 'latin1', 'iso-8859-1', 'cp1252']
-        
-        for encoding in encodings_to_try:
+        if data:
+            df = pd.DataFrame(data)
+            
+            # Convert numeric columns
+            numeric_columns = [
+                'Total Order Sold Qty', 'Total MTSKU Sold Qty', 'Total sebelum Pajak', 'Pajak',
+                'Total setelah Pajak', 'Amount after tax (Confirmed)', 'Commission Fees',
+                'Commission Fees (Confirmed)', 'Storage Fees', 'Storage Fees (Confirmed)',
+                'Warehouse Handling Fees', 'Warehouse Handling Fees (Confirmed)', 'Logistics Fees',
+                'Logistics Fees (Confirmed)', 'Inbound Penalty Fees', 'Inbound Penalty Fees (Confirmed)',
+                'Other Fees', 'Other Fees (Confirmed)', 'Settlement Amount'
+            ]
+            for col in numeric_columns:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # Get last modified info
             try:
-                file_bytes.seek(0)
-                df = pd.read_csv(file_bytes, encoding=encoding)
-                return df, modified_time
-            except UnicodeDecodeError:
-                continue
-            except Exception:
-                continue
-        
-        st.error("❌ Gagal membaca file CSV.")
+                last_updated = worksheet.acell('A1').value
+                if last_updated and last_updated.startswith('Last Updated:'):
+                    modified_time = last_updated.replace('Last Updated: ', '')
+                else:
+                    modified_time = "Unknown"
+            except:
+                modified_time = "Unknown"
+            
+            return df, modified_time
+        else:
+            return None, None
+    except gspread.exceptions.WorksheetNotFound:
+        # Buat worksheet baru jika belum ada
+        sheet = client.open_by_key(GOOGLE_SHEET_ID)
+        worksheet = sheet.add_worksheet(title=SHEET_NAME, rows=1000, cols=50)
         return None, None
-    
-    return None, None
+    except Exception as e:
+        st.warning(f"⚠️ Gagal load dari Google Sheets: {str(e)}")
+        return None, None
 
-def compile_all_reports(service, force_refresh=False):
+def compile_all_reports(service, client, force_refresh=False):
     """Baca semua file dari semua store, compile menjadi satu DataFrame."""
     if not force_refresh:
-        cached_df, modified_time = load_master_csv(service)
-        if cached_df is not None:
-            st.info(f"📦 Menggunakan data cache dari {modified_time}")
+        cached_df, modified_time = load_from_gsheet(client)
+        if cached_df is not None and not cached_df.empty:
+            st.info(f"📦 Menggunakan data cache dari Google Sheets (Last Update: {modified_time})")
             return cached_df, modified_time
     
     all_data = []
@@ -181,67 +203,41 @@ def compile_all_reports(service, force_refresh=False):
     else:
         return pd.DataFrame(), None
 
-def save_master_csv(service, df):
-    """
-    Simpan DataFrame sebagai CSV ke folder yang sudah di-share.
-    File akan menggunakan quota storage pemilik folder (Anda).
-    """
-    # Konversi DataFrame ke CSV
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
-    csv_bytes = io.BytesIO(csv_buffer.getvalue().encode('utf-8-sig'))
-    
-    # Cek apakah file sudah ada di folder tujuan
-    query = f"name='{MASTER_FILENAME}' and '{OUTPUT_FOLDER_ID}' in parents and trashed=false"
-    results = service.files().list(
-        q=query,
-        fields="files(id)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
-    ).execute()
-    
-    existing_files = results.get('files', [])
-    is_update = len(existing_files) > 0
-    
-    if existing_files:
-        # Update file existing
-        file_id = existing_files[0]['id']
+def save_to_gsheet(client, df):
+    """Simpan DataFrame ke Google Sheets."""
+    try:
+        sheet = client.open_by_key(GOOGLE_SHEET_ID)
         
-        media = MediaIoBaseUpload(
-            csv_bytes,
-            mimetype='text/csv',
-            resumable=True
-        )
+        # Coba dapatkan worksheet, buat jika belum ada
+        try:
+            worksheet = sheet.worksheet(SHEET_NAME)
+            worksheet.clear()  # Hapus data lama
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = sheet.add_worksheet(title=SHEET_NAME, rows=len(df)+10, cols=len(df.columns)+5)
         
-        service.files().update(
-            fileId=file_id,
-            media_body=media,
-            supportsAllDrives=True
-        ).execute()
+        # Update header dengan timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        worksheet.update('A1', f'Last Updated: {timestamp}')
         
-        return file_id, is_update
-    else:
-        # Buat file baru langsung di folder tujuan
-        file_metadata = {
-            'name': MASTER_FILENAME,
-            'parents': [OUTPUT_FOLDER_ID],
-            'mimeType': 'text/csv'
-        }
+        # Siapkan data untuk diupload
+        # Gspread punya batasan ukuran, jadi kita upload per batch jika perlu
         
-        media = MediaIoBaseUpload(
-            csv_bytes,
-            mimetype='text/csv',
-            resumable=True
-        )
+        # Konversi DataFrame ke list of lists
+        headers = df.columns.tolist()
+        data = [headers] + df.fillna('').values.tolist()
         
-        file = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id',
-            supportsAllDrives=True
-        ).execute()
+        # Update worksheet
+        worksheet.update('A2', data)
         
-        return file.get('id'), is_update
+        # Format header
+        worksheet.format('A2:Z2', {
+            "textFormat": {"bold": True},
+            "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2}
+        })
+        
+        return True, timestamp
+    except Exception as e:
+        raise e
 
 def format_rupiah(value):
     """Format angka ke format Rupiah."""
@@ -260,11 +256,16 @@ if 'last_update' not in st.session_state:
 st.sidebar.header("⚙️ Kontrol")
 action = st.sidebar.radio(
     "📌 Pilih Aksi",
-    ["📥 Load & Compile Data", "📊 Lihat Dashboard", "💾 Simpan ke Drive (CSV)"]
+    ["📥 Load & Compile Data", "📊 Lihat Dashboard", "💾 Simpan ke Google Sheets"]
 )
 
-# Service account authentication
-service = get_drive_service()
+# Authentication
+try:
+    service = get_drive_service()
+    gsheet_client = get_gsheet_client()
+except Exception as e:
+    st.error(f"❌ Gagal autentikasi: {str(e)}")
+    st.stop()
 
 # -------------------- LOAD & COMPILE --------------------
 if action == "📥 Load & Compile Data":
@@ -279,7 +280,7 @@ if action == "📥 Load & Compile Data":
     
     if st.button("🚀 Mulai Compile Semua Report", type="primary", use_container_width=True):
         with st.spinner("🔄 Membaca dan memproses semua file Excel..."):
-            compiled_df, cache_time = compile_all_reports(service, force_refresh=force_refresh)
+            compiled_df, cache_time = compile_all_reports(service, gsheet_client, force_refresh=force_refresh)
             
             if not compiled_df.empty:
                 st.session_state.compiled_df = compiled_df
@@ -322,11 +323,11 @@ elif action == "📊 Lihat Dashboard":
     st.header("📊 Dashboard Charging Report")
     
     if st.session_state.compiled_df is None:
-        with st.spinner("📦 Mencoba load data dari cache..."):
-            compiled_df, cache_time = compile_all_reports(service, force_refresh=False)
+        with st.spinner("📦 Mencoba load data dari Google Sheets..."):
+            compiled_df, cache_time = compile_all_reports(service, gsheet_client, force_refresh=False)
             if not compiled_df.empty:
                 st.session_state.compiled_df = compiled_df
-                st.info(f"📦 Data dimuat dari cache ({cache_time})")
+                st.info(f"📦 Data dimuat dari Google Sheets (Last Update: {cache_time})")
             else:
                 st.warning("⚠️ Tidak ada data. Silakan Load & Compile terlebih dahulu.")
                 st.stop()
@@ -395,6 +396,9 @@ elif action == "📊 Lihat Dashboard":
             fig2.update_layout(showlegend=False)
             st.plotly_chart(fig2, use_container_width=True)
     
+    # Link ke Google Sheets
+    st.markdown(f"📊 [Buka Data Lengkap di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
+    
     # Download button
     csv = df_filtered.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
@@ -404,53 +408,44 @@ elif action == "📊 Lihat Dashboard":
         mime="text/csv"
     )
 
-# -------------------- SAVE TO DRIVE --------------------
-elif action == "💾 Simpan ke Drive (CSV)":
-    st.header("💾 Simpan Hasil Compile ke Google Drive")
+# -------------------- SAVE TO GOOGLE SHEETS --------------------
+elif action == "💾 Simpan ke Google Sheets":
+    st.header("💾 Simpan Hasil Compile ke Google Sheets")
     
     if st.session_state.compiled_df is None:
         st.warning("⚠️ Tidak ada data untuk disimpan. Silakan Load & Compile terlebih dahulu.")
     else:
         df = st.session_state.compiled_df
         st.info(f"📊 Data yang akan disimpan: **{len(df):,} baris**, **{df['Store'].nunique()} store**")
-        st.text(f"📁 Lokasi: Folder ID `{OUTPUT_FOLDER_ID}`")
-        st.text(f"📄 Nama file: `{MASTER_FILENAME}`")
+        st.text(f"📁 Google Sheet ID: `{GOOGLE_SHEET_ID}`")
+        st.text(f"📄 Sheet Name: `{SHEET_NAME}`")
         
-        if st.button("📤 Simpan ke Google Drive", type="primary", use_container_width=True):
-            with st.spinner("🔄 Menyimpan file ke Google Drive..."):
+        st.markdown(f"[📊 Buka Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
+        
+        if st.button("📤 Simpan ke Google Sheets", type="primary", use_container_width=True):
+            with st.spinner("🔄 Menyimpan data ke Google Sheets..."):
                 try:
-                    file_id, is_update = save_master_csv(service, df)
+                    success, timestamp = save_to_gsheet(gsheet_client, df)
                     
-                    if is_update:
-                        st.success(f"✅ File berhasil di-update!")
-                    else:
-                        st.success(f"✅ File baru berhasil dibuat!")
-                    
-                    st.markdown(f"[📁 Buka di Google Drive](https://drive.google.com/file/d/{file_id}/view)")
-                    st.markdown(f"[📂 Buka Folder Utama](https://drive.google.com/drive/folders/{OUTPUT_FOLDER_ID})")
-                    
-                    st.session_state.last_update = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    
-                except Exception as e:
-                    error_msg = str(e)
-                    st.error(f"❌ Gagal menyimpan file: {error_msg}")
-                    
-                    # Cek apakah error karena quota
-                    if "storageQuotaExceeded" in error_msg or "storage quota" in error_msg.lower():
-                        st.warning("""
-                        **Service Account tidak memiliki storage quota.**
+                    if success:
+                        st.success(f"✅ Data berhasil disimpan ke Google Sheets!")
+                        st.info(f"🕒 Last Updated: {timestamp}")
+                        st.markdown(f"[📊 Lihat Hasil di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit#gid=0)")
                         
-                        Solusi:
-                        1. Pastikan folder tujuan sudah di-**share ke Service Account** dengan akses **Editor**
-                        2. Atau download manual menggunakan tombol di bawah
-                        """)
+                        st.session_state.last_update = timestamp
+                    else:
+                        st.error("❌ Gagal menyimpan data.")
+                        
+                except Exception as e:
+                    st.error(f"❌ Gagal menyimpan ke Google Sheets: {str(e)}")
                     
                     # Fallback download
+                    st.warning("Silakan download manual sebagai alternatif:")
                     csv_download = df.to_csv(index=False).encode('utf-8-sig')
                     st.download_button(
                         label="📥 Download CSV (Manual)",
                         data=csv_download,
-                        file_name=MASTER_FILENAME,
+                        file_name="Master_Charging_Report.csv",
                         mime="text/csv"
                     )
 
@@ -460,3 +455,8 @@ if st.session_state.last_update:
     st.sidebar.caption(f"🕒 Data terakhir di-load: {st.session_state.last_update}")
 if st.session_state.compiled_df is not None:
     st.sidebar.caption(f"📊 {len(st.session_state.compiled_df):,} baris di memory")
+
+st.sidebar.divider()
+st.sidebar.caption("📌 Sheet yang dibaca: Charging Report Summary")
+st.sidebar.caption(f"📁 Total folder store: {len(FOLDER_IDS)}")
+st.sidebar.caption(f"📊 Output: Google Sheets")
