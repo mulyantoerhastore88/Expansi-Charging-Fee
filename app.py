@@ -6,6 +6,8 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from datetime import datetime
 import gspread
+from streamlit_echarts import st_echarts
+import plotly.express as px
 
 # -------------------- CONFIG --------------------
 st.set_page_config(page_title="Shopee Charging Report Dashboard", layout="wide")
@@ -243,14 +245,10 @@ def build_summary_table(charging_df, gmv_df, qty_df):
     if charging_df.empty:
         return pd.DataFrame()
     
-    st.write("### 🔍 Debug build_summary_table")
-    
-    # Bersihkan periode
     if 'Periode' in charging_df.columns:
         charging_df['Periode'] = charging_df['Periode'].astype(str).str.strip()
         charging_df['Periode'] = charging_df['Periode'].apply(convert_periode)
     
-    # Cari kolom amount
     amount_col = None
     for name in ['Amount after tax (Confirmed)', 'Amount_after_tax_(Confirmed)', 'Total setelah Pajak', 'Total_setelah_Pajak']:
         if name in charging_df.columns:
@@ -264,50 +262,17 @@ def build_summary_table(charging_df, gmv_df, qty_df):
                 break
     
     if amount_col is None:
-        st.error("❌ Kolom Amount tidak ditemukan")
         return pd.DataFrame()
     
-    st.write(f"Menggunakan kolom amount: **{amount_col}**")
-    
-    # DEBUG: Tampilkan sample nilai asli
-    st.write("🔍 Sample nilai Amount (sebelum konversi):")
-    sample = charging_df[['Store', 'Periode', amount_col]].head(10).copy()
-    st.dataframe(sample)
-    
-    # Cek tipe data
-    st.write(f"🔍 Tipe data: {charging_df[amount_col].dtype}")
-    
-    # Coba konversi paksa dengan replace koma dan Rp
     charging_df[amount_col] = charging_df[amount_col].astype(str).str.replace('Rp', '').str.replace(',', '').str.strip()
     charging_df[amount_col] = pd.to_numeric(charging_df[amount_col], errors='coerce')
     
-    # DEBUG: Tampilkan setelah konversi
-    st.write("🔍 Sample nilai Amount (setelah konversi):")
-    sample2 = charging_df[['Store', 'Periode', amount_col]].head(10).copy()
-    st.dataframe(sample2)
-    
-    # Cek jumlah non-zero
-    non_zero = (charging_df[amount_col] > 0).sum()
-    st.write(f"🔍 Jumlah baris dengan nilai > 0: {non_zero} dari {len(charging_df)}")
-    
-    if non_zero == 0:
-        st.warning("⚠️ Semua nilai Amount adalah 0 atau NaN! Periksa data di Google Sheets.")
-    
-    # Agregasi
     charging_agg = charging_df.groupby(['Store', 'Periode'])[amount_col].sum().reset_index()
     charging_agg.columns = ['Store', 'Periode', 'Charging']
     
-    st.write("🔍 Charging Agg (first 10):")
-    st.dataframe(charging_agg.head(10))
-    
-    # Transform GMV dan Qty
     gmv_long = wide_to_long(gmv_df, 'GMV')
     qty_long = wide_to_long(qty_df, 'Order_Qty')
     
-    st.write(f"GMV Long shape: {gmv_long.shape}")
-    st.write(f"Qty Long shape: {qty_long.shape}")
-    
-    # Gabungkan
     summary = charging_agg.copy()
     
     if not gmv_long.empty:
@@ -336,6 +301,18 @@ def format_rupiah(value):
     except:
         return "-"
 
+def format_rupiah_short(value):
+    try:
+        val = float(value)
+        if val >= 1e9:
+            return f"Rp {val/1e9:.1f}B"
+        elif val >= 1e6:
+            return f"Rp {val/1e6:.1f}M"
+        else:
+            return f"Rp {val/1e3:.0f}K"
+    except:
+        return "-"
+
 def format_percent(value):
     try:
         return f"{float(value):.2f}%"
@@ -348,6 +325,108 @@ def format_number(value):
     except:
         return "-"
 
+# -------------------- ECHARTS FUNCTIONS --------------------
+def create_bar_chart(data, x_col, y_col, title, color='#5470c6'):
+    """Buat bar chart dengan ECharts."""
+    options = {
+        "title": {"text": title, "left": "center"},
+        "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+        "grid": {"left": "10%", "right": "5%", "bottom": "15%", "top": "15%", "containLabel": True},
+        "xAxis": {
+            "type": "category",
+            "data": data[x_col].tolist(),
+            "axisLabel": {"rotate": 45, "interval": 0}
+        },
+        "yAxis": {"type": "value"},
+        "series": [{
+            "name": y_col,
+            "type": "bar",
+            "data": data[y_col].tolist(),
+            "itemStyle": {"color": color},
+            "label": {"show": True, "position": "top"}
+        }]
+    }
+    return options
+
+def create_line_chart(data, x_col, y_cols, title, colors=None):
+    """Buat line chart dengan ECharts."""
+    if colors is None:
+        colors = ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de']
+    
+    series = []
+    for i, col in enumerate(y_cols):
+        series.append({
+            "name": col,
+            "type": "line",
+            "data": data[col].tolist(),
+            "smooth": True,
+            "color": colors[i % len(colors)],
+            "label": {"show": True, "position": "top"}
+        })
+    
+    options = {
+        "title": {"text": title, "left": "center"},
+        "tooltip": {"trigger": "axis"},
+        "legend": {"data": y_cols, "bottom": 0},
+        "grid": {"left": "10%", "right": "5%", "bottom": "20%", "top": "15%", "containLabel": True},
+        "xAxis": {
+            "type": "category",
+            "data": data[x_col].tolist(),
+            "axisLabel": {"rotate": 45}
+        },
+        "yAxis": {"type": "value"},
+        "series": series
+    }
+    return options
+
+def create_pie_chart(data, labels_col, values_col, title):
+    """Buat pie chart dengan ECharts."""
+    pie_data = [{"name": row[labels_col], "value": row[values_col]} for _, row in data.iterrows()]
+    
+    options = {
+        "title": {"text": title, "left": "center"},
+        "tooltip": {"trigger": "item"},
+        "legend": {"orient": "vertical", "left": "left"},
+        "series": [{
+            "name": values_col,
+            "type": "pie",
+            "radius": "60%",
+            "data": pie_data,
+            "emphasis": {"itemStyle": {"shadowBlur": 10, "shadowOffsetX": 0, "shadowColor": "rgba(0, 0, 0, 0.5)"}},
+            "label": {"show": True, "formatter": "{b}: {d}%"}
+        }]
+    }
+    return options
+
+def create_gauge_chart(value, title, min_val=0, max_val=100):
+    """Buat gauge chart untuk metrik tunggal."""
+    options = {
+        "title": {"text": title, "left": "center"},
+        "series": [{
+            "type": "gauge",
+            "center": ["50%", "60%"],
+            "radius": "80%",
+            "startAngle": 210,
+            "endAngle": -30,
+            "min": min_val,
+            "max": max_val,
+            "progress": {"show": True, "width": 20},
+            "axisLine": {"lineStyle": {"width": 20}},
+            "axisTick": {"show": False},
+            "splitLine": {"show": False},
+            "axisLabel": {"show": False},
+            "pointer": {"show": True, "length": "70%", "width": 8},
+            "detail": {
+                "offsetCenter": [0, 0],
+                "valueAnimation": True,
+                "fontSize": 24,
+                "formatter": "{value}%"
+            },
+            "data": [{"value": value, "name": title}]
+        }]
+    }
+    return options
+
 # -------------------- MAIN APP --------------------
 if 'charging_df' not in st.session_state:
     st.session_state.charging_df = None
@@ -357,7 +436,7 @@ if 'last_update' not in st.session_state:
 st.sidebar.header("⚙️ Kontrol")
 action = st.sidebar.radio(
     "📌 Pilih Aksi",
-    ["📥 Load & Compile Data", "📊 Dashboard Ringkasan", "💾 Simpan ke Google Sheets"]
+    ["📥 Load & Compile Data", "📊 Dashboard ECharts", "📈 Dashboard Plotly", "💾 Simpan ke Google Sheets"]
 )
 
 try:
@@ -392,9 +471,9 @@ if action == "📥 Load & Compile Data":
             else:
                 st.warning("⚠️ Tidak ada data yang berhasil di-compile.")
 
-# -------------------- DASHBOARD --------------------
-elif action == "📊 Dashboard Ringkasan":
-    st.header("📊 Dashboard Ringkasan per Store per Bulan")
+# -------------------- DASHBOARD ECHARTS --------------------
+elif action == "📊 Dashboard ECharts":
+    st.header("📊 Dashboard ECharts - Shopee Charging Report")
     
     with st.spinner("📦 Memuat data dari Google Sheets..."):
         charging_df = load_sheet_data_with_timestamp(gsheet_client, SHEET_MASTER)
@@ -405,11 +484,10 @@ elif action == "📊 Dashboard Ringkasan":
         st.warning("⚠️ Data charging belum tersedia.")
         st.stop()
     
-    # Build summary
     summary_df = build_summary_table(charging_df, gmv_df, qty_df)
     
     if summary_df.empty:
-        st.warning("⚠️ Tidak dapat membuat tabel ringkasan.")
+        st.warning("⚠️ Tidak dapat membuat ringkasan.")
         st.stop()
     
     # Filter Store Shopee
@@ -424,57 +502,156 @@ elif action == "📊 Dashboard Ringkasan":
         st.warning("⚠️ Tidak ada data untuk Store Shopee di tahun 2026.")
         st.stop()
     
-    # Filter Store
-    stores = st.sidebar.multiselect(
+    # Sidebar filters
+    st.sidebar.subheader("🔍 Filter")
+    selected_stores = st.sidebar.multiselect(
         "Pilih Store",
         options=sorted(summary_df['Store'].unique()),
         default=sorted(summary_df['Store'].unique())
     )
     
-    df_filtered = summary_df[summary_df['Store'].isin(stores)]
+    df_filtered = summary_df[summary_df['Store'].isin(selected_stores)]
     
-    # Pivot Table
-    st.subheader("📋 Tabel Ringkasan")
+    # ========== KPI METRICS ==========
+    st.subheader("📊 Key Performance Indicators")
     
-    metric_choice = st.selectbox(
-        "Pilih Metrik",
-        ["GMV", "Order Qty", "Charging", "AOV", "Cost Ratio (%)", "Cost per Order"]
-    )
+    total_gmv = df_filtered['GMV'].sum()
+    total_charging = df_filtered['Charging'].sum()
+    total_orders = df_filtered['Order_Qty'].sum()
+    avg_cost_ratio = df_filtered['Cost_Ratio_%'].mean()
+    avg_aov = df_filtered['AOV'].mean()
     
-    metric_map = {
-        "GMV": "GMV",
-        "Order Qty": "Order_Qty",
-        "Charging": "Charging",
-        "AOV": "AOV",
-        "Cost Ratio (%)": "Cost_Ratio_%",
-        "Cost per Order": "Cost_per_Order"
-    }
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.metric("💰 Total GMV", format_rupiah_short(total_gmv))
+    with col2:
+        st.metric("📦 Total Charging", format_rupiah_short(total_charging))
+    with col3:
+        st.metric("🛒 Total Orders", format_number(total_orders))
+    with col4:
+        st.metric("📊 Avg Cost Ratio", format_percent(avg_cost_ratio))
+    with col5:
+        st.metric("💵 Avg AOV", format_rupiah_short(avg_aov))
     
-    metric_col = metric_map[metric_choice]
+    # ========== ROW 1: Bar & Pie Charts ==========
+    st.subheader("📈 Analisis per Store")
+    col1, col2 = st.columns(2)
     
-    pivot_df = df_filtered.pivot_table(
-        index='Store',
-        columns='Periode',
-        values=metric_col,
-        aggfunc='sum' if metric_choice in ["GMV", "Order Qty", "Charging"] else 'mean'
-    )
+    with col1:
+        # Bar Chart: GMV per Store
+        store_summary = df_filtered.groupby('Store').agg({
+            'GMV': 'sum', 'Charging': 'sum', 'Order_Qty': 'sum', 'Cost_Ratio_%': 'mean'
+        }).reset_index()
+        
+        bar_options = create_bar_chart(
+            store_summary, 'Store', 'GMV',
+            'Total GMV per Store', '#5470c6'
+        )
+        st_echarts(options=bar_options, height="400px")
     
-    available_months = [m for m in MONTH_ORDER if m in pivot_df.columns]
-    if available_months:
-        pivot_df = pivot_df[available_months]
+    with col2:
+        # Pie Chart: Charging Distribution
+        pie_options = create_pie_chart(
+            store_summary, 'Store', 'Charging',
+            'Distribusi Charging per Store'
+        )
+        st_echarts(options=pie_options, height="400px")
     
-    if metric_choice in ["GMV", "Charging", "AOV", "Cost per Order"]:
-        st.dataframe(pivot_df.style.format(lambda x: format_rupiah(x) if pd.notna(x) and x != 0 else "-"))
-    elif metric_choice == "Cost Ratio (%)":
-        st.dataframe(pivot_df.style.format(lambda x: format_percent(x) if pd.notna(x) and x != 0 else "-"))
-    else:
-        st.dataframe(pivot_df.style.format(lambda x: format_number(x) if pd.notna(x) and x != 0 else "-"))
+    # ========== ROW 2: Line Charts ==========
+    st.subheader("📉 Tren Bulanan")
+    col1, col2 = st.columns(2)
     
-    # Detail per Store
-    st.subheader("📊 Detail per Store")
-    selected_store = st.selectbox("Pilih Store", sorted(df_filtered['Store'].unique()))
+    with col1:
+        # Line Chart: GMV & Charging Trend
+        monthly_trend = df_filtered.groupby('Periode').agg({
+            'GMV': 'sum', 'Charging': 'sum'
+        }).reset_index()
+        
+        # Urutkan
+        monthly_trend['Periode'] = pd.Categorical(monthly_trend['Periode'], categories=MONTH_ORDER, ordered=True)
+        monthly_trend = monthly_trend.sort_values('Periode').dropna(subset=['Periode'])
+        
+        line_options = create_line_chart(
+            monthly_trend, 'Periode', ['GMV', 'Charging'],
+            'Tren GMV vs Charging', ['#5470c6', '#ee6666']
+        )
+        st_echarts(options=line_options, height="400px")
     
-    store_detail = df_filtered[df_filtered['Store'] == selected_store].sort_values('Periode')
+    with col2:
+        # Line Chart: Cost Ratio per Store
+        cost_trend = df_filtered.pivot_table(
+            index='Periode', columns='Store', values='Cost_Ratio_%', aggfunc='mean'
+        ).reset_index()
+        cost_trend['Periode'] = pd.Categorical(cost_trend['Periode'], categories=MONTH_ORDER, ordered=True)
+        cost_trend = cost_trend.sort_values('Periode').dropna(subset=['Periode'])
+        
+        stores_list = [s for s in selected_stores if s in cost_trend.columns]
+        if stores_list:
+            line_options2 = create_line_chart(
+                cost_trend, 'Periode', stores_list,
+                'Tren Cost Ratio (%) per Store'
+            )
+            st_echarts(options=line_options2, height="400px")
+        else:
+            st.info("Pilih store untuk melihat tren.")
+    
+    # ========== ROW 3: Gauge & Scatter ==========
+    st.subheader("🎯 Metrik Performa")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Gauge Chart: Avg Cost Ratio
+        gauge_value = min(avg_cost_ratio, 100) if pd.notna(avg_cost_ratio) else 0
+        gauge_options = create_gauge_chart(gauge_value, "Rata-rata Cost Ratio", 0, 20)
+        st_echarts(options=gauge_options, height="300px")
+        
+        # Insight text
+        if avg_cost_ratio < 3:
+            st.success("✅ Cost Ratio sangat baik (< 3%)")
+        elif avg_cost_ratio < 5:
+            st.info("ℹ️ Cost Ratio normal (3-5%)")
+        else:
+            st.warning("⚠️ Cost Ratio tinggi (> 5%)")
+    
+    with col2:
+        # Top/Bottom Insights
+        st.subheader("📋 Insight Performa Store")
+        
+        best_store = store_summary.loc[store_summary['Cost_Ratio_%'].idxmin()]
+        worst_store = store_summary.loc[store_summary['Cost_Ratio_%'].idxmax()]
+        
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.metric(
+                "🏆 Store Terbaik (Cost Ratio Terendah)",
+                best_store['Store'],
+                delta=format_percent(best_store['Cost_Ratio_%']),
+                delta_color="inverse"
+            )
+        with col_b:
+            st.metric(
+                "⚠️ Store Perlu Perhatian",
+                worst_store['Store'],
+                delta=format_percent(worst_store['Cost_Ratio_%']),
+                delta_color="inverse"
+            )
+        
+        st.divider()
+        
+        # Tabel ringkasan singkat
+        st.write("**Ringkasan per Store:**")
+        summary_display = store_summary[['Store', 'GMV', 'Charging', 'Order_Qty', 'Cost_Ratio_%']].copy()
+        summary_display['GMV'] = summary_display['GMV'].apply(format_rupiah_short)
+        summary_display['Charging'] = summary_display['Charging'].apply(format_rupiah_short)
+        summary_display['Cost_Ratio_%'] = summary_display['Cost_Ratio_%'].apply(format_percent)
+        summary_display.columns = ['Store', 'GMV', 'Charging', 'Orders', 'Cost Ratio']
+        st.dataframe(summary_display, use_container_width=True, hide_index=True)
+    
+    # ========== ROW 4: Detail Table ==========
+    st.subheader("📊 Data Detail per Periode")
+    
+    selected_store_detail = st.selectbox("Pilih Store untuk Detail", sorted(df_filtered['Store'].unique()))
+    store_detail = df_filtered[df_filtered['Store'] == selected_store_detail].sort_values('Periode')
     
     display_df = pd.DataFrame({
         'Periode': store_detail['Periode'],
@@ -483,10 +660,120 @@ elif action == "📊 Dashboard Ringkasan":
         'Charging': store_detail['Charging'].apply(format_rupiah),
         'AOV': store_detail['AOV'].apply(format_rupiah),
         'Cost Ratio': store_detail['Cost_Ratio_%'].apply(format_percent),
-        'Cost per Order': store_detail['Cost_per_Order'].apply(format_rupiah)
+        'Cost/Order': store_detail['Cost_per_Order'].apply(format_rupiah)
     })
     
     st.dataframe(display_df, use_container_width=True, hide_index=True)
+    
+    # Download button
+    csv = df_filtered.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label="📥 Download Data (CSV)",
+        data=csv,
+        file_name=f"shopee_charging_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv"
+    )
+    
+    st.markdown(f"📊 [Buka di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
+
+# -------------------- DASHBOARD PLOTLY --------------------
+elif action == "📈 Dashboard Plotly":
+    st.header("📈 Dashboard Plotly - Shopee Charging Report")
+    
+    with st.spinner("📦 Memuat data dari Google Sheets..."):
+        charging_df = load_sheet_data_with_timestamp(gsheet_client, SHEET_MASTER)
+        gmv_df = load_sheet_data_simple(gsheet_client, SHEET_GMV)
+        qty_df = load_sheet_data_simple(gsheet_client, SHEET_QTY)
+    
+    if charging_df.empty:
+        st.warning("⚠️ Data charging belum tersedia.")
+        st.stop()
+    
+    summary_df = build_summary_table(charging_df, gmv_df, qty_df)
+    
+    if summary_df.empty:
+        st.warning("⚠️ Tidak dapat membuat ringkasan.")
+        st.stop()
+    
+    shopee_stores = ["Shopee Bali", "Shopee Makassar", "Shopee Medan", "Shopee Semarang", "Shopee Surabaya"]
+    summary_df = summary_df[summary_df['Store'].isin(shopee_stores)]
+    
+    periods_2026 = [p for p in summary_df['Periode'].unique() if '26' in str(p)]
+    summary_df = summary_df[summary_df['Periode'].isin(periods_2026)]
+    
+    if summary_df.empty:
+        st.warning("⚠️ Tidak ada data untuk Store Shopee di tahun 2026.")
+        st.stop()
+    
+    st.sidebar.subheader("🔍 Filter")
+    selected_stores = st.sidebar.multiselect(
+        "Pilih Store",
+        options=sorted(summary_df['Store'].unique()),
+        default=sorted(summary_df['Store'].unique())
+    )
+    
+    df_filtered = summary_df[summary_df['Store'].isin(selected_stores)]
+    
+    # KPI Metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.metric("💰 Total GMV", format_rupiah_short(df_filtered['GMV'].sum()))
+    with col2:
+        st.metric("📦 Total Charging", format_rupiah_short(df_filtered['Charging'].sum()))
+    with col3:
+        st.metric("🛒 Total Orders", format_number(df_filtered['Order_Qty'].sum()))
+    with col4:
+        st.metric("📊 Avg Cost Ratio", format_percent(df_filtered['Cost_Ratio_%'].mean()))
+    with col5:
+        st.metric("💵 Avg AOV", format_rupiah_short(df_filtered['AOV'].mean()))
+    
+    # Charts
+    st.subheader("📈 Visualisasi Plotly")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        store_summary = df_filtered.groupby('Store').agg({
+            'GMV': 'sum', 'Charging': 'sum'
+        }).reset_index()
+        
+        fig1 = px.bar(
+            store_summary, x='Store', y=['GMV', 'Charging'],
+            title="GMV vs Charging per Store", barmode='group',
+            color_discrete_sequence=['#5470c6', '#ee6666']
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+    
+    with col2:
+        fig2 = px.pie(
+            store_summary, values='Charging', names='Store',
+            title="Distribusi Charging per Store"
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        monthly_trend = df_filtered.groupby('Periode').agg({
+            'GMV': 'sum', 'Charging': 'sum'
+        }).reset_index()
+        monthly_trend['Periode'] = pd.Categorical(monthly_trend['Periode'], categories=MONTH_ORDER, ordered=True)
+        monthly_trend = monthly_trend.sort_values('Periode').dropna()
+        
+        fig3 = px.line(
+            monthly_trend, x='Periode', y=['GMV', 'Charging'],
+            title="Tren GMV vs Charging", markers=True,
+            color_discrete_sequence=['#5470c6', '#ee6666']
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+    
+    with col2:
+        store_cost = df_filtered.groupby('Store')['Cost_Ratio_%'].mean().reset_index()
+        fig4 = px.bar(
+            store_cost, x='Store', y='Cost_Ratio_%',
+            title="Rata-rata Cost Ratio per Store",
+            color='Cost_Ratio_%', color_continuous_scale='RdYlGn_r'
+        )
+        st.plotly_chart(fig4, use_container_width=True)
     
     st.markdown(f"📊 [Buka di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
 
