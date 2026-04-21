@@ -257,19 +257,30 @@ def build_combined_dataset(charging_df, gmv_df, qty_df, pca_charging_df):
     
     charging_df[amount_col] = pd.to_numeric(charging_df[amount_col], errors='coerce')
     
-    # Agregasi
-    charging_agg = charging_df.groupby([store_col, periode_col]).agg({
+    # KONVERSI PERIODE: dari "2025-04" ke "Apr 25", "2026-01" ke "Jan 26"
+    def convert_periode(p):
+        try:
+            # Jika format "2025-04"
+            if isinstance(p, str) and '-' in p and p[0].isdigit():
+                dt = pd.to_datetime(p)
+                return dt.strftime('%b %y')
+            # Jika sudah format "Apr 25" atau "Jan 26"
+            return p
+        except:
+            return p
+    
+    charging_df['Periode_Converted'] = charging_df[periode_col].apply(convert_periode)
+    
+    # Agregasi dengan periode yang sudah dikonversi
+    charging_agg = charging_df.groupby([store_col, 'Periode_Converted']).agg({
         amount_col: 'sum'
     }).reset_index()
     
-    charging_agg.rename(columns={amount_col: 'Charging', store_col: 'Store', periode_col: 'Periode'}, inplace=True)
+    charging_agg.rename(columns={amount_col: 'Charging', store_col: 'Store', 'Periode_Converted': 'Periode'}, inplace=True)
     
-    # Filter hanya periode yang ada di MONTH_ORDER
-    charging_agg = charging_agg[charging_agg['Periode'].isin(MONTH_ORDER)]
+    # DEBUG
+    st.write("🔍 Periode setelah konversi:", charging_agg['Periode'].unique().tolist())
     
-    if charging_agg.empty:
-        st.warning("⚠️ Tidak ada data charging untuk periode 2026")
-        return pd.DataFrame()
     
     # Transform GMV dan Qty
     gmv_long = transform_monthly_sheet(gmv_df, 'GMV')
