@@ -247,6 +247,9 @@ def build_summary_table(charging_df, gmv_df, qty_df):
     if charging_df.empty:
         return pd.DataFrame()
     
+    st.write("### 🔍 Debug build_summary_table")
+    st.write("Kolom Charging:", charging_df.columns.tolist())
+    
     # Bersihkan periode di Charging
     if 'Periode' in charging_df.columns:
         charging_df['Periode'] = charging_df['Periode'].astype(str).str.strip()
@@ -254,23 +257,45 @@ def build_summary_table(charging_df, gmv_df, qty_df):
     
     # Cari kolom amount
     amount_col = None
-    for col in charging_df.columns:
-        if 'amount' in col.lower() or 'total_setelah' in col.lower():
-            amount_col = col
+    possible_names = [
+        'Amount_after_tax_(Confirmed)',
+        'Amount after tax (Confirmed)',
+        'Total_setelah_Pajak',
+        'Total setelah Pajak'
+    ]
+    
+    for name in possible_names:
+        if name in charging_df.columns:
+            amount_col = name
             break
+    
+    if amount_col is None:
+        for col in charging_df.columns:
+            col_lower = col.lower()
+            if 'amount' in col_lower or 'total_setelah' in col_lower or 'setelah_pajak' in col_lower:
+                amount_col = col
+                break
     
     if amount_col is None:
         st.error("❌ Kolom Amount tidak ditemukan")
         return pd.DataFrame()
+    
+    st.write(f"Menggunakan kolom amount: **{amount_col}**")
     
     charging_df[amount_col] = pd.to_numeric(charging_df[amount_col], errors='coerce')
     
     charging_agg = charging_df.groupby(['Store', 'Periode'])[amount_col].sum().reset_index()
     charging_agg.columns = ['Store', 'Periode', 'Charging']
     
+    st.write("Charging Agg (first 10):")
+    st.dataframe(charging_agg.head(10))
+    
     # Transform GMV dan Qty
     gmv_long = wide_to_long(gmv_df, 'GMV')
     qty_long = wide_to_long(qty_df, 'Order_Qty')
+    
+    st.write(f"GMV Long shape: {gmv_long.shape}")
+    st.write(f"Qty Long shape: {qty_long.shape}")
     
     # Gabungkan
     summary = charging_agg.copy()
@@ -285,12 +310,10 @@ def build_summary_table(charging_df, gmv_df, qty_df):
     else:
         summary['Order_Qty'] = 0
     
-    # Isi NaN dengan 0
     summary['GMV'] = summary['GMV'].fillna(0)
     summary['Order_Qty'] = summary['Order_Qty'].fillna(0)
     summary['Charging'] = summary['Charging'].fillna(0)
     
-    # Hitung metrik
     summary['AOV'] = summary.apply(lambda r: r['GMV'] / r['Order_Qty'] if r['Order_Qty'] > 0 else 0, axis=1)
     summary['Cost_Ratio_%'] = summary.apply(lambda r: (r['Charging'] / r['GMV']) * 100 if r['GMV'] > 0 else 0, axis=1)
     summary['Cost_per_Order'] = summary.apply(lambda r: r['Charging'] / r['Order_Qty'] if r['Order_Qty'] > 0 else 0, axis=1)
@@ -374,6 +397,10 @@ elif action == "📊 Dashboard Ringkasan":
     
     # Build summary
     summary_df = build_summary_table(charging_df, gmv_df, qty_df)
+    
+    if summary_df.empty:
+        st.warning("⚠️ Tidak dapat membuat tabel ringkasan.")
+        st.stop()
     
     # Filter hanya Store Shopee
     shopee_stores = ["Shopee Bali", "Shopee Makassar", "Shopee Medan", "Shopee Semarang", "Shopee Surabaya"]
