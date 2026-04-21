@@ -532,11 +532,48 @@ elif action == "📊 Lihat Dashboard":
     
     # Scatter Plot
     st.subheader("🔵 Korelasi GMV vs Charging")
-    fig5 = px.scatter(
-        df_filtered, x='GMV', y='Charging', color='Store', size='Order_Qty',
-        hover_data=['Periode', 'Cost_Ratio_%'], title="GMV vs Charging (ukuran bubble = Order Qty)"
-    )
-    st.plotly_chart(fig5, use_container_width=True)
+    
+    # Bersihkan data - hapus baris dengan NaN di GMV atau Charging
+    scatter_df = df_filtered.dropna(subset=['GMV', 'Charging', 'Store']).copy()
+    
+    if not scatter_df.empty and len(scatter_df) > 1:
+        # Tangani Order_Qty yang mungkin NaN
+        if 'Order_Qty' not in scatter_df.columns:
+            scatter_df['Order_Qty'] = 1
+        else:
+            scatter_df['Order_Qty'] = pd.to_numeric(scatter_df['Order_Qty'], errors='coerce').fillna(1)
+            scatter_df['Order_Qty'] = scatter_df['Order_Qty'].clip(lower=1)
+        
+        # Tangani Cost_Ratio_% yang mungkin NaN untuk hover
+        if 'Cost_Ratio_%' not in scatter_df.columns:
+            scatter_df['Cost_Ratio_%'] = 0
+        
+        try:
+            fig5 = px.scatter(
+                scatter_df, 
+                x='GMV', 
+                y='Charging', 
+                color='Store', 
+                size='Order_Qty',
+                hover_data=['Periode', 'Cost_Ratio_%'], 
+                title="GMV vs Charging (ukuran bubble = Order Qty)",
+                size_max=30  # Batasi ukuran bubble maksimal
+            )
+            st.plotly_chart(fig5, use_container_width=True)
+        except Exception as e:
+            st.warning(f"⚠️ Gagal membuat scatter plot: {str(e)}")
+            # Fallback: scatter tanpa size
+            fig5 = px.scatter(
+                scatter_df, 
+                x='GMV', 
+                y='Charging', 
+                color='Store',
+                hover_data=['Periode'], 
+                title="GMV vs Charging"
+            )
+            st.plotly_chart(fig5, use_container_width=True)
+    else:
+        st.info("📊 Tidak cukup data untuk scatter plot (minimal 2 titik data).")
     
     # Tabel Insight
     st.subheader("📋 Tabel Insight per Store")
