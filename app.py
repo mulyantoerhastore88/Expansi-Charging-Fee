@@ -29,7 +29,6 @@ SHEET_MASTER = "Master_Charging_Report"
 SHEET_GMV = "Order GMV"
 SHEET_QTY = "Order Qty"
 
-# Urutan bulan yang diharapkan
 MONTH_ORDER = ["Jan 26", "Feb 26", "Mar 26", "Apr 26", "May 26", "Jun 26",
                "Jul 26", "Aug 26", "Sep 26", "Oct 26", "Nov 26", "Dec 26"]
 
@@ -200,14 +199,11 @@ def save_charging_to_gsheet(client, df):
         raise e
 
 def wide_to_long(df, value_name):
-    """Ubah format wide (bulan sebagai kolom) ke long (satu baris per bulan)."""
+    """Ubah format wide ke long."""
     if df.empty:
         return pd.DataFrame()
     
-    # Kolom pertama adalah Store
     store_col = df.columns[0]
-    
-    # Kolom bulan adalah kolom selanjutnya
     month_cols = [col for col in df.columns[1:] if col in MONTH_ORDER]
     
     if not month_cols:
@@ -222,11 +218,12 @@ def wide_to_long(df, value_name):
     
     df_long.rename(columns={store_col: 'Store'}, inplace=True)
     df_long[value_name] = pd.to_numeric(df_long[value_name], errors='coerce')
+    df_long = df_long.dropna(subset=[value_name])
     
     return df_long[['Store', 'Periode', value_name]]
 
 def convert_periode(p):
-    """Konversi periode dari '2025-04' ke 'Apr 25'."""
+    """Konversi periode ke format 'Jan 26'."""
     try:
         if isinstance(p, str) and '-' in p and p[0].isdigit():
             dt = pd.to_datetime(p)
@@ -236,29 +233,20 @@ def convert_periode(p):
         return str(p)
 
 def build_summary_table(charging_df, gmv_df, qty_df):
-    """Gabungkan Charging, GMV, dan Qty menjadi satu tabel ringkasan."""
+    """Gabungkan Charging, GMV, dan Qty."""
     if charging_df.empty:
         return pd.DataFrame()
     
-    # 1. Agregasi Charging per Store per Periode
-    # Cari kolom yang tepat
-    store_col = 'Store'
-    periode_col = 'Periode'
-    
-    # Konversi periode di charging_df
+    # 1. Agregasi Charging
     if 'Periode' in charging_df.columns:
         charging_df['Periode'] = charging_df['Periode'].apply(convert_periode)
     
     # Cari kolom amount
-    amount_cols = ['Amount after tax (Confirmed)', 'Total setelah Pajak', 'Amount_after_tax_(Confirmed)']
-    amount_col = next((col for col in amount_cols if col in charging_df.columns), None)
-    
-    if amount_col is None:
-        # Coba cari yang mengandung keyword
-        for col in charging_df.columns:
-            if 'amount' in col.lower() or 'total_setelah' in col.lower():
-                amount_col = col
-                break
+    amount_col = None
+    for col in charging_df.columns:
+        if 'amount' in col.lower() or 'total_setelah' in col.lower():
+            amount_col = col
+            break
     
     if amount_col is None:
         st.error("❌ Kolom Amount tidak ditemukan")
@@ -267,11 +255,10 @@ def build_summary_table(charging_df, gmv_df, qty_df):
     
     charging_df[amount_col] = pd.to_numeric(charging_df[amount_col], errors='coerce')
     
-    # Agregasi
     charging_agg = charging_df.groupby(['Store', 'Periode'])[amount_col].sum().reset_index()
     charging_agg.columns = ['Store', 'Periode', 'Charging']
     
-    # 2. Ubah GMV dan Qty ke format long
+    # 2. Transform GMV dan Qty
     gmv_long = wide_to_long(gmv_df, 'GMV')
     qty_long = wide_to_long(qty_df, 'Order_Qty')
     
@@ -288,17 +275,15 @@ def build_summary_table(charging_df, gmv_df, qty_df):
     else:
         summary['Order_Qty'] = 0
     
-    # 4. Hitung metrik
+    # 4. Isi NaN dengan 0
     summary['GMV'] = summary['GMV'].fillna(0)
     summary['Order_Qty'] = summary['Order_Qty'].fillna(0)
     summary['Charging'] = summary['Charging'].fillna(0)
     
+    # 5. Hitung metrik
     summary['AOV'] = summary.apply(lambda r: r['GMV'] / r['Order_Qty'] if r['Order_Qty'] > 0 else 0, axis=1)
     summary['Cost_Ratio_%'] = summary.apply(lambda r: (r['Charging'] / r['GMV']) * 100 if r['GMV'] > 0 else 0, axis=1)
     summary['Cost_per_Order'] = summary.apply(lambda r: r['Charging'] / r['Order_Qty'] if r['Order_Qty'] > 0 else 0, axis=1)
-    
-    # Filter hanya periode yang ada di MONTH_ORDER
-    summary = summary[summary['Periode'].isin(MONTH_ORDER)]
     
     return summary
 
@@ -377,16 +362,45 @@ elif action == "📊 Dashboard Ringkasan":
         st.warning("⚠️ Data charging belum tersedia.")
         st.stop()
     
-    # Debug: Tampilkan info data
-    with st.expander("🔍 Debug Info", expanded=False):
-        st.write("Charging shape:", charging_df.shape)
-        st.write("GMV shape:", gmv_df.shape)
-        st.write("Qty shape:", qty_df.shape)
-        st.write("GMV columns:", gmv_df.columns.tolist() if not gmv_df.empty else "Kosong")
-        st.write("Qty columns:", qty_df.columns.tolist() if not qty_df.empty else "Kosong")
+    # ========== DEBUG DETAIL ==========
+    with st.expander("🔍 DEBUG - Periksa Data", expanded=True):
+        st.subheader("1️⃣ Charging Data")
+        st.write(f"Shape: {charging_df.shape}")
+        st.write("Store unik:", sorted(charging_df['Store'].unique()))
+        st.write("Periode unik:", sorted(charging_df['Periode'].unique()))
+        st.write("Sample data:")
+        st.dataframe(charging_df[['Store', 'Periode', 'Amount after tax (Confirmed)']].head(10) if 'Amount after tax (Confirmed)' in charging_df.columns else charging_df.head(10))
+        
+        st.subheader("2️⃣ GMV Data (sebelum transform)")
+        st.write(f"Shape: {gmv_df.shape}")
+        st.write("Kolom:", gmv_df.columns.tolist())
+        if not gmv_df.empty:
+            st.write("Store unik:", sorted(gmv_df[gmv_df.columns[0]].unique()))
+            st.dataframe(gmv_df.head(10))
+        
+        st.subheader("3️⃣ Qty Data (sebelum transform)")
+        st.write(f"Shape: {qty_df.shape}")
+        st.write("Kolom:", qty_df.columns.tolist())
+        if not qty_df.empty:
+            st.write("Store unik:", sorted(qty_df[qty_df.columns[0]].unique()))
+            st.dataframe(qty_df.head(10))
     
     # Build summary
     summary_df = build_summary_table(charging_df, gmv_df, qty_df)
+    
+    with st.expander("🔍 DEBUG - Hasil Transform & Merge", expanded=True):
+        st.subheader("GMV Long")
+        gmv_long = wide_to_long(gmv_df, 'GMV')
+        st.write(f"Shape: {gmv_long.shape}")
+        st.dataframe(gmv_long.head(10))
+        
+        st.subheader("Qty Long")
+        qty_long = wide_to_long(qty_df, 'Order_Qty')
+        st.write(f"Shape: {qty_long.shape}")
+        st.dataframe(qty_long.head(10))
+        
+        st.subheader("Charging Agg")
+        st.dataframe(summary_df[['Store', 'Periode', 'Charging', 'GMV', 'Order_Qty']].head(20))
     
     if summary_df.empty:
         st.warning("⚠️ Tidak dapat membuat tabel ringkasan.")
@@ -401,7 +415,7 @@ elif action == "📊 Dashboard Ringkasan":
     
     df_filtered = summary_df[summary_df['Store'].isin(stores)]
     
-    # Tampilkan Pivot Table
+    # Pivot Table
     st.subheader("📋 Tabel Ringkasan")
     
     metric_choice = st.selectbox(
@@ -420,7 +434,6 @@ elif action == "📊 Dashboard Ringkasan":
     
     metric_col = metric_map[metric_choice]
     
-    # Pivot table
     pivot_df = df_filtered.pivot_table(
         index='Store',
         columns='Periode',
@@ -428,17 +441,16 @@ elif action == "📊 Dashboard Ringkasan":
         aggfunc='sum' if metric_choice in ["GMV", "Order Qty", "Charging"] else 'mean'
     )
     
-    # Urutkan kolom
     available_months = [m for m in MONTH_ORDER if m in pivot_df.columns]
-    pivot_df = pivot_df[available_months]
+    if available_months:
+        pivot_df = pivot_df[available_months]
     
-    # Format
     if metric_choice in ["GMV", "Charging", "AOV", "Cost per Order"]:
-        st.dataframe(pivot_df.style.format(lambda x: format_rupiah(x) if pd.notna(x) else "-"))
+        st.dataframe(pivot_df.style.format(lambda x: format_rupiah(x) if pd.notna(x) and x != 0 else "-"))
     elif metric_choice == "Cost Ratio (%)":
-        st.dataframe(pivot_df.style.format(lambda x: format_percent(x) if pd.notna(x) else "-"))
+        st.dataframe(pivot_df.style.format(lambda x: format_percent(x) if pd.notna(x) and x != 0 else "-"))
     else:
-        st.dataframe(pivot_df.style.format(lambda x: format_number(x) if pd.notna(x) else "-"))
+        st.dataframe(pivot_df.style.format(lambda x: format_number(x) if pd.notna(x) and x != 0 else "-"))
     
     # Detail per Store
     st.subheader("📊 Detail per Store")
@@ -446,7 +458,6 @@ elif action == "📊 Dashboard Ringkasan":
     
     store_detail = df_filtered[df_filtered['Store'] == selected_store].sort_values('Periode')
     
-    # Format untuk tampilan
     display_df = pd.DataFrame({
         'Periode': store_detail['Periode'],
         'GMV': store_detail['GMV'].apply(format_rupiah),
@@ -459,7 +470,6 @@ elif action == "📊 Dashboard Ringkasan":
     
     st.dataframe(display_df, use_container_width=True, hide_index=True)
     
-    # Link
     st.markdown(f"📊 [Buka di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
 
 # -------------------- SAVE --------------------
