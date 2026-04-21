@@ -230,22 +230,26 @@ def wide_to_long(df, value_name):
     return df_long[['Store', 'Periode', value_name]]
 
 def convert_periode(p):
-    """Konversi periode ke format 'Jan 26'."""
+    """Konversi periode ke format 'Jan 26' (tanpa spasi)."""
     try:
-        if isinstance(p, str) and '-' in p and p[0].isdigit():
-            dt = pd.to_datetime(p)
-            return dt.strftime('%b %y')
+        if isinstance(p, str):
+            p = p.strip()
+            if '-' in p and p[0].isdigit():
+                dt = pd.to_datetime(p)
+                return dt.strftime('%b %y')
+            return p
         return str(p).strip()
     except:
-        return str(p)
+        return str(p).strip()
 
 def build_summary_table(charging_df, gmv_df, qty_df):
     """Gabungkan Charging, GMV, dan Qty."""
     if charging_df.empty:
         return pd.DataFrame()
     
-    # 1. Agregasi Charging
+    # Bersihkan periode di Charging
     if 'Periode' in charging_df.columns:
+        charging_df['Periode'] = charging_df['Periode'].astype(str).str.strip()
         charging_df['Periode'] = charging_df['Periode'].apply(convert_periode)
     
     # Cari kolom amount
@@ -264,11 +268,11 @@ def build_summary_table(charging_df, gmv_df, qty_df):
     charging_agg = charging_df.groupby(['Store', 'Periode'])[amount_col].sum().reset_index()
     charging_agg.columns = ['Store', 'Periode', 'Charging']
     
-    # 2. Transform GMV dan Qty
+    # Transform GMV dan Qty
     gmv_long = wide_to_long(gmv_df, 'GMV')
     qty_long = wide_to_long(qty_df, 'Order_Qty')
     
-    # 3. Gabungkan
+    # Gabungkan
     summary = charging_agg.copy()
     
     if not gmv_long.empty:
@@ -281,12 +285,12 @@ def build_summary_table(charging_df, gmv_df, qty_df):
     else:
         summary['Order_Qty'] = 0
     
-    # 4. Isi NaN dengan 0
+    # Isi NaN dengan 0
     summary['GMV'] = summary['GMV'].fillna(0)
     summary['Order_Qty'] = summary['Order_Qty'].fillna(0)
     summary['Charging'] = summary['Charging'].fillna(0)
     
-    # 5. Hitung metrik
+    # Hitung metrik
     summary['AOV'] = summary.apply(lambda r: r['GMV'] / r['Order_Qty'] if r['Order_Qty'] > 0 else 0, axis=1)
     summary['Cost_Ratio_%'] = summary.apply(lambda r: (r['Charging'] / r['GMV']) * 100 if r['GMV'] > 0 else 0, axis=1)
     summary['Cost_per_Order'] = summary.apply(lambda r: r['Charging'] / r['Order_Qty'] if r['Order_Qty'] > 0 else 0, axis=1)
