@@ -50,7 +50,6 @@ def get_gsheet_client():
 
 # -------------------- HELPER FUNCTIONS --------------------
 def clean_column_names(df):
-    """Bersihkan nama kolom: hilangkan spasi di awal/akhir."""
     df.columns = [str(col).strip() for col in df.columns]
     return df
 
@@ -206,7 +205,6 @@ def save_charging_to_gsheet(client, df):
         raise e
 
 def wide_to_long(df, value_name):
-    """Ubah format wide ke long."""
     if df.empty:
         return pd.DataFrame()
     
@@ -230,7 +228,6 @@ def wide_to_long(df, value_name):
     return df_long[['Store', 'Periode', value_name]]
 
 def convert_periode(p):
-    """Konversi periode ke format 'Jan 26' (tanpa spasi)."""
     try:
         if isinstance(p, str):
             p = p.strip()
@@ -243,36 +240,26 @@ def convert_periode(p):
         return str(p).strip()
 
 def build_summary_table(charging_df, gmv_df, qty_df):
-    """Gabungkan Charging, GMV, dan Qty."""
     if charging_df.empty:
         return pd.DataFrame()
     
     st.write("### 🔍 Debug build_summary_table")
-    st.write("Kolom Charging:", charging_df.columns.tolist())
     
-    # Bersihkan periode di Charging
+    # Bersihkan periode
     if 'Periode' in charging_df.columns:
         charging_df['Periode'] = charging_df['Periode'].astype(str).str.strip()
         charging_df['Periode'] = charging_df['Periode'].apply(convert_periode)
     
     # Cari kolom amount
     amount_col = None
-    possible_names = [
-        'Amount_after_tax_(Confirmed)',
-        'Amount after tax (Confirmed)',
-        'Total_setelah_Pajak',
-        'Total setelah Pajak'
-    ]
-    
-    for name in possible_names:
+    for name in ['Amount after tax (Confirmed)', 'Amount_after_tax_(Confirmed)', 'Total setelah Pajak', 'Total_setelah_Pajak']:
         if name in charging_df.columns:
             amount_col = name
             break
     
     if amount_col is None:
         for col in charging_df.columns:
-            col_lower = col.lower()
-            if 'amount' in col_lower or 'total_setelah' in col_lower or 'setelah_pajak' in col_lower:
+            if 'amount' in col.lower() or 'total_setelah' in col.lower():
                 amount_col = col
                 break
     
@@ -282,12 +269,35 @@ def build_summary_table(charging_df, gmv_df, qty_df):
     
     st.write(f"Menggunakan kolom amount: **{amount_col}**")
     
+    # DEBUG: Tampilkan sample nilai asli
+    st.write("🔍 Sample nilai Amount (sebelum konversi):")
+    sample = charging_df[['Store', 'Periode', amount_col]].head(10).copy()
+    st.dataframe(sample)
+    
+    # Cek tipe data
+    st.write(f"🔍 Tipe data: {charging_df[amount_col].dtype}")
+    
+    # Coba konversi paksa dengan replace koma dan Rp
+    charging_df[amount_col] = charging_df[amount_col].astype(str).str.replace('Rp', '').str.replace(',', '').str.strip()
     charging_df[amount_col] = pd.to_numeric(charging_df[amount_col], errors='coerce')
     
+    # DEBUG: Tampilkan setelah konversi
+    st.write("🔍 Sample nilai Amount (setelah konversi):")
+    sample2 = charging_df[['Store', 'Periode', amount_col]].head(10).copy()
+    st.dataframe(sample2)
+    
+    # Cek jumlah non-zero
+    non_zero = (charging_df[amount_col] > 0).sum()
+    st.write(f"🔍 Jumlah baris dengan nilai > 0: {non_zero} dari {len(charging_df)}")
+    
+    if non_zero == 0:
+        st.warning("⚠️ Semua nilai Amount adalah 0 atau NaN! Periksa data di Google Sheets.")
+    
+    # Agregasi
     charging_agg = charging_df.groupby(['Store', 'Periode'])[amount_col].sum().reset_index()
     charging_agg.columns = ['Store', 'Periode', 'Charging']
     
-    st.write("Charging Agg (first 10):")
+    st.write("🔍 Charging Agg (first 10):")
     st.dataframe(charging_agg.head(10))
     
     # Transform GMV dan Qty
@@ -402,11 +412,11 @@ elif action == "📊 Dashboard Ringkasan":
         st.warning("⚠️ Tidak dapat membuat tabel ringkasan.")
         st.stop()
     
-    # Filter hanya Store Shopee
+    # Filter Store Shopee
     shopee_stores = ["Shopee Bali", "Shopee Makassar", "Shopee Medan", "Shopee Semarang", "Shopee Surabaya"]
     summary_df = summary_df[summary_df['Store'].isin(shopee_stores)]
     
-    # Filter hanya periode 2026
+    # Filter periode 2026
     periods_2026 = [p for p in summary_df['Periode'].unique() if '26' in str(p)]
     summary_df = summary_df[summary_df['Periode'].isin(periods_2026)]
     
