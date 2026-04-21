@@ -49,6 +49,11 @@ def get_gsheet_client():
     return gspread.authorize(get_credentials())
 
 # -------------------- HELPER FUNCTIONS --------------------
+def clean_column_names(df):
+    """Bersihkan nama kolom: hilangkan spasi di awal/akhir."""
+    df.columns = [str(col).strip() for col in df.columns]
+    return df
+
 def list_excel_files_in_folder(service, folder_id):
     query = f"'{folder_id}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
     results = service.files().list(
@@ -112,6 +117,7 @@ def load_sheet_data_with_timestamp(client, sheet_name):
         
         df = pd.DataFrame(data_rows, columns=clean_headers)
         df = df.replace('', pd.NA)
+        df = clean_column_names(df)
         
         return df
     except Exception as e:
@@ -125,6 +131,7 @@ def load_sheet_data_simple(client, sheet_name):
         data = worksheet.get_all_records()
         if data:
             df = pd.DataFrame(data)
+            df = clean_column_names(df)
             return df
         return pd.DataFrame()
     except Exception as e:
@@ -250,7 +257,6 @@ def build_summary_table(charging_df, gmv_df, qty_df):
     
     if amount_col is None:
         st.error("❌ Kolom Amount tidak ditemukan")
-        st.write("Kolom tersedia:", charging_df.columns.tolist())
         return pd.DataFrame()
     
     charging_df[amount_col] = pd.to_numeric(charging_df[amount_col], errors='coerce')
@@ -362,48 +368,19 @@ elif action == "📊 Dashboard Ringkasan":
         st.warning("⚠️ Data charging belum tersedia.")
         st.stop()
     
-    # ========== DEBUG DETAIL ==========
-    with st.expander("🔍 DEBUG - Periksa Data", expanded=True):
-        st.subheader("1️⃣ Charging Data")
-        st.write(f"Shape: {charging_df.shape}")
-        st.write("Store unik:", sorted(charging_df['Store'].unique()))
-        st.write("Periode unik:", sorted(charging_df['Periode'].unique()))
-        st.write("Sample data:")
-        st.dataframe(charging_df[['Store', 'Periode', 'Amount after tax (Confirmed)']].head(10) if 'Amount after tax (Confirmed)' in charging_df.columns else charging_df.head(10))
-        
-        st.subheader("2️⃣ GMV Data (sebelum transform)")
-        st.write(f"Shape: {gmv_df.shape}")
-        st.write("Kolom:", gmv_df.columns.tolist())
-        if not gmv_df.empty:
-            st.write("Store unik:", sorted(gmv_df[gmv_df.columns[0]].unique()))
-            st.dataframe(gmv_df.head(10))
-        
-        st.subheader("3️⃣ Qty Data (sebelum transform)")
-        st.write(f"Shape: {qty_df.shape}")
-        st.write("Kolom:", qty_df.columns.tolist())
-        if not qty_df.empty:
-            st.write("Store unik:", sorted(qty_df[qty_df.columns[0]].unique()))
-            st.dataframe(qty_df.head(10))
-    
     # Build summary
     summary_df = build_summary_table(charging_df, gmv_df, qty_df)
     
-    with st.expander("🔍 DEBUG - Hasil Transform & Merge", expanded=True):
-        st.subheader("GMV Long")
-        gmv_long = wide_to_long(gmv_df, 'GMV')
-        st.write(f"Shape: {gmv_long.shape}")
-        st.dataframe(gmv_long.head(10))
-        
-        st.subheader("Qty Long")
-        qty_long = wide_to_long(qty_df, 'Order_Qty')
-        st.write(f"Shape: {qty_long.shape}")
-        st.dataframe(qty_long.head(10))
-        
-        st.subheader("Charging Agg")
-        st.dataframe(summary_df[['Store', 'Periode', 'Charging', 'GMV', 'Order_Qty']].head(20))
+    # Filter hanya Store Shopee
+    shopee_stores = ["Shopee Bali", "Shopee Makassar", "Shopee Medan", "Shopee Semarang", "Shopee Surabaya"]
+    summary_df = summary_df[summary_df['Store'].isin(shopee_stores)]
+    
+    # Filter hanya periode 2026
+    periods_2026 = [p for p in summary_df['Periode'].unique() if '26' in str(p)]
+    summary_df = summary_df[summary_df['Periode'].isin(periods_2026)]
     
     if summary_df.empty:
-        st.warning("⚠️ Tidak dapat membuat tabel ringkasan.")
+        st.warning("⚠️ Tidak ada data untuk Store Shopee di tahun 2026.")
         st.stop()
     
     # Filter Store
