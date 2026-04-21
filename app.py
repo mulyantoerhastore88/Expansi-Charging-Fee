@@ -33,6 +33,12 @@ SHEET_GMV = "Order GMV"
 SHEET_QTY = "Order Qty"
 SHEET_PCA = "Charging PCA"
 
+# Urutan bulan untuk sorting
+MONTH_ORDER = [
+    "Jan 26", "Feb 26", "Mar 26", "Apr 26", "May 26", "Jun 26",
+    "Jul 26", "Aug 26", "Sep 26", "Oct 26", "Nov 26", "Dec 26"
+]
+
 # -------------------- AUTHENTICATION --------------------
 @st.cache_resource
 def get_credentials():
@@ -76,8 +82,11 @@ def process_excel(file_bytes, store_name, file_name):
             return pd.DataFrame()
         df['Store'] = store_name
         df['Source File'] = file_name
+        
+        # Konversi Waktu Periode Dimulai ke format "Jan 26"
         if 'Waktu Periode Dimulai' in df.columns:
-            df['Periode'] = pd.to_datetime(df['Waktu Periode Dimulai']).dt.to_period('M').astype(str)
+            df['Periode'] = pd.to_datetime(df['Waktu Periode Dimulai']).dt.strftime('%b %y')
+        
         return df
     except Exception as e:
         st.warning(f"⚠️ Error processing {store_name}/{file_name}: {str(e)}")
@@ -93,7 +102,6 @@ def load_sheet_data_with_timestamp(client, sheet_name):
         if not all_data or len(all_data) < 3:
             return pd.DataFrame()
         
-        # Baris 1: timestamp, Baris 2: header, Baris 3+: data
         headers = all_data[1]
         data_rows = all_data[2:]
         
@@ -189,29 +197,14 @@ def transform_monthly_sheet(df, value_name):
     if df.empty:
         return pd.DataFrame()
     
-    # Cari kolom Store (bisa 'Store' atau 'Description')
     id_col = 'Store' if 'Store' in df.columns else 'Description'
-    
     month_cols = [col for col in df.columns if col not in [id_col, 'Description']]
     
-    df_melted = df.melt(id_vars=[id_col], value_vars=month_cols, var_name='Month', value_name=value_name)
-    
-    month_map = {
-        'Jan_26': '2026-01', 'Feb_26': '2026-02', 'Mar_26': '2026-03',
-        'Apr_26': '2026-04', 'May_26': '2026-05', 'Jun_26': '2026-06',
-        'Jul_26': '2026-07', 'Aug_26': '2026-08', 'Sep_26': '2026-09',
-        'Oct_26': '2026-10', 'Nov_26': '2026-11', 'Dec_26': '2026-12',
-        # Fallback untuk format tanpa underscore
-        'Jan 26': '2026-01', 'Feb 26': '2026-02', 'Mar 26': '2026-03',
-        'Apr 26': '2026-04', 'May 26': '2026-05', 'Jun 26': '2026-06',
-        'Jul 26': '2026-07', 'Aug 26': '2026-08', 'Sep 26': '2026-09',
-        'Oct 26': '2026-10', 'Nov 26': '2026-11', 'Dec 26': '2026-12'
-    }
-    
-    df_melted['Periode'] = df_melted['Month'].map(month_map)
-    df_melted = df_melted.dropna(subset=['Periode'])
-    
+    df_melted = df.melt(id_vars=[id_col], value_vars=month_cols, var_name='Periode', value_name=value_name)
     df_melted.rename(columns={id_col: 'Store'}, inplace=True)
+    
+    # Filter hanya bulan yang valid
+    df_melted = df_melted[df_melted['Periode'].isin(MONTH_ORDER)]
     
     return df_melted[['Store', 'Periode', value_name]]
 
@@ -220,7 +213,6 @@ def transform_pca_charging(df_pca):
     if df_pca.empty:
         return pd.DataFrame()
     
-    # Cari baris yang mengandung 'Charging PCA'
     pca_row = None
     for idx, row in df_pca.iterrows():
         first_val = str(row.iloc[0]) if not pd.isna(row.iloc[0]) else ''
@@ -235,31 +227,16 @@ def transform_pca_charging(df_pca):
     
     data = []
     for col in month_cols:
-        if col in pca_row.index:
+        if col in pca_row.index and col in MONTH_ORDER:
             val = pca_row[col]
             if not pd.isna(val) and str(val).strip() != '':
-                data.append({'Month': col, 'Charging': val})
+                data.append({'Periode': col, 'Charging': val})
     
     if not data:
         return pd.DataFrame()
     
     df_melted = pd.DataFrame(data)
-    
-    month_map = {
-        'Jan_26': '2026-01', 'Feb_26': '2026-02', 'Mar_26': '2026-03',
-        'Apr_26': '2026-04', 'May_26': '2026-05', 'Jun_26': '2026-06',
-        'Jul_26': '2026-07', 'Aug_26': '2026-08', 'Sep_26': '2026-09',
-        'Oct_26': '2026-10', 'Nov_26': '2026-11', 'Dec_26': '2026-12',
-        'Jan 26': '2026-01', 'Feb 26': '2026-02', 'Mar 26': '2026-03',
-        'Apr 26': '2026-04', 'May 26': '2026-05', 'Jun 26': '2026-06',
-        'Jul 26': '2026-07', 'Aug 26': '2026-08', 'Sep 26': '2026-09',
-        'Oct 26': '2026-10', 'Nov 26': '2026-11', 'Dec 26': '2026-12'
-    }
-    
-    df_melted['Periode'] = df_melted['Month'].map(month_map)
-    df_melted = df_melted.dropna(subset=['Periode'])
     df_melted['Store'] = 'PCA'
-    
     df_melted['Charging'] = pd.to_numeric(df_melted['Charging'], errors='coerce')
     
     return df_melted[['Store', 'Periode', 'Charging']]
@@ -269,16 +246,15 @@ def build_combined_dataset(charging_df, gmv_df, qty_df, pca_charging_df):
     if charging_df.empty:
         return pd.DataFrame()
     
-    # Cari kolom yang tepat di charging_df
+    # Cari kolom yang tepat
     store_col = next((col for col in charging_df.columns if 'store' in col.lower()), 'Store')
     periode_col = next((col for col in charging_df.columns if 'periode' in col.lower()), 'Periode')
     amount_col = next((col for col in charging_df.columns if 'amount_after_tax' in col.lower() or 'total_setelah_pajak' in col.lower()), None)
     
     if amount_col is None:
-        st.error("❌ Kolom Amount tidak ditemukan di charging_df")
+        st.error("❌ Kolom Amount tidak ditemukan")
         return pd.DataFrame()
     
-    # Konversi ke numerik
     charging_df[amount_col] = pd.to_numeric(charging_df[amount_col], errors='coerce')
     
     # Agregasi
@@ -288,8 +264,8 @@ def build_combined_dataset(charging_df, gmv_df, qty_df, pca_charging_df):
     
     charging_agg.rename(columns={amount_col: 'Charging', store_col: 'Store', periode_col: 'Periode'}, inplace=True)
     
-    # Filter periode 2026
-    charging_agg = charging_agg[charging_agg['Periode'].astype(str).str.startswith('2026', na=False)]
+    # Filter hanya periode yang ada di MONTH_ORDER
+    charging_agg = charging_agg[charging_agg['Periode'].isin(MONTH_ORDER)]
     
     if charging_agg.empty:
         st.warning("⚠️ Tidak ada data charging untuk periode 2026")
@@ -316,7 +292,6 @@ def build_combined_dataset(charging_df, gmv_df, qty_df, pca_charging_df):
     combined['AOV'] = combined['GMV'] / combined['Order_Qty']
     combined['Charging_per_Order'] = combined['Charging'] / combined['Order_Qty']
     
-    # Hapus baris dengan NaN di kolom penting
     combined = combined.dropna(subset=['Store', 'Periode'])
     
     return combined
@@ -424,7 +399,7 @@ elif action == "📊 Lihat Dashboard":
         st.warning("⚠️ Data charging belum tersedia. Silakan Load & Compile terlebih dahulu.")
         st.stop()
     
-    # Debug: tampilkan info data
+    # Debug info
     with st.expander("🔍 Debug Info", expanded=False):
         st.write("Charging DF shape:", charging_df.shape)
         st.write("Charging DF columns:", charging_df.columns.tolist())
@@ -448,8 +423,8 @@ elif action == "📊 Lihat Dashboard":
     )
     periods = st.sidebar.multiselect(
         "Pilih Periode",
-        options=sorted(combined_df['Periode'].unique()),
-        default=sorted(combined_df['Periode'].unique())
+        options=[p for p in MONTH_ORDER if p in combined_df['Periode'].unique()],
+        default=[p for p in MONTH_ORDER if p in combined_df['Periode'].unique()]
     )
     
     df_filtered = combined_df[
@@ -508,72 +483,66 @@ elif action == "📊 Lihat Dashboard":
     col1, col2 = st.columns(2)
     
     with col1:
+        # Urutkan berdasarkan MONTH_ORDER
+        df_filtered['Periode'] = pd.Categorical(df_filtered['Periode'], categories=MONTH_ORDER, ordered=True)
+        df_sorted = df_filtered.sort_values('Periode')
+        
         fig3 = px.line(
-            df_filtered, x='Periode', y='Cost_Ratio_%', color='Store',
+            df_sorted, x='Periode', y='Cost_Ratio_%', color='Store',
             markers=True, title="Tren Cost Ratio (%) per Store"
         )
+        fig3.update_xaxis(type='category', tickangle=-45)
         st.plotly_chart(fig3, use_container_width=True)
     
     with col2:
-        monthly_trend = df_filtered.groupby('Periode').agg({'Charging': 'sum', 'GMV': 'sum'}).reset_index()
+        monthly_trend = df_filtered.groupby('Periode', observed=False).agg({'Charging': 'sum', 'GMV': 'sum'}).reset_index()
+        monthly_trend['Periode'] = pd.Categorical(monthly_trend['Periode'], categories=MONTH_ORDER, ordered=True)
+        monthly_trend = monthly_trend.sort_values('Periode')
+        
         fig4 = go.Figure()
-        fig4.add_trace(go.Bar(x=monthly_trend['Periode'], y=monthly_trend['GMV'], name='GMV', yaxis='y2'))
+        fig4.add_trace(go.Bar(
+            x=monthly_trend['Periode'], y=monthly_trend['GMV'], 
+            name='GMV', yaxis='y2', marker=dict(color='lightblue')
+        ))
         fig4.add_trace(go.Scatter(
             x=monthly_trend['Periode'], y=monthly_trend['Charging'],
-            name='Charging', mode='lines+markers', line=dict(color='red', width=3)
+            name='Charging', mode='lines+markers', 
+            line=dict(color='red', width=3), marker=dict(size=8)
         ))
         fig4.update_layout(
             title="Tren Bulanan: Charging vs GMV",
             yaxis=dict(title="Charging (Rp)"),
             yaxis2=dict(title="GMV (Rp)", overlaying='y', side='right'),
-            legend=dict(x=0.01, y=0.99)
+            legend=dict(x=0.01, y=0.99),
+            xaxis=dict(type='category', tickangle=-45)
         )
         st.plotly_chart(fig4, use_container_width=True)
     
     # Scatter Plot
     st.subheader("🔵 Korelasi GMV vs Charging")
-    
-    # Bersihkan data - hapus baris dengan NaN di GMV atau Charging
     scatter_df = df_filtered.dropna(subset=['GMV', 'Charging', 'Store']).copy()
     
     if not scatter_df.empty and len(scatter_df) > 1:
-        # Tangani Order_Qty yang mungkin NaN
         if 'Order_Qty' not in scatter_df.columns:
             scatter_df['Order_Qty'] = 1
         else:
-            scatter_df['Order_Qty'] = pd.to_numeric(scatter_df['Order_Qty'], errors='coerce').fillna(1)
-            scatter_df['Order_Qty'] = scatter_df['Order_Qty'].clip(lower=1)
-        
-        # Tangani Cost_Ratio_% yang mungkin NaN untuk hover
-        if 'Cost_Ratio_%' not in scatter_df.columns:
-            scatter_df['Cost_Ratio_%'] = 0
+            scatter_df['Order_Qty'] = pd.to_numeric(scatter_df['Order_Qty'], errors='coerce').fillna(1).clip(lower=1)
         
         try:
             fig5 = px.scatter(
-                scatter_df, 
-                x='GMV', 
-                y='Charging', 
-                color='Store', 
-                size='Order_Qty',
-                hover_data=['Periode', 'Cost_Ratio_%'], 
-                title="GMV vs Charging (ukuran bubble = Order Qty)",
-                size_max=30  # Batasi ukuran bubble maksimal
+                scatter_df, x='GMV', y='Charging', color='Store', 
+                size='Order_Qty', hover_data=['Periode', 'Cost_Ratio_%'],
+                title="GMV vs Charging (ukuran bubble = Order Qty)", size_max=30
             )
             st.plotly_chart(fig5, use_container_width=True)
         except Exception as e:
-            st.warning(f"⚠️ Gagal membuat scatter plot: {str(e)}")
-            # Fallback: scatter tanpa size
             fig5 = px.scatter(
-                scatter_df, 
-                x='GMV', 
-                y='Charging', 
-                color='Store',
-                hover_data=['Periode'], 
-                title="GMV vs Charging"
+                scatter_df, x='GMV', y='Charging', color='Store',
+                hover_data=['Periode'], title="GMV vs Charging"
             )
             st.plotly_chart(fig5, use_container_width=True)
     else:
-        st.info("📊 Tidak cukup data untuk scatter plot (minimal 2 titik data).")
+        st.info("📊 Tidak cukup data untuk scatter plot.")
     
     # Tabel Insight
     st.subheader("📋 Tabel Insight per Store")
@@ -587,26 +556,18 @@ elif action == "📊 Lihat Dashboard":
     st.dataframe(
         insight_df[['Store', 'Charging_Fmt', 'GMV_Fmt', 'Order_Qty', 'Cost_Ratio_Fmt', 'AOV_Fmt']],
         column_config={
-            'Store': 'Store',
-            'Charging_Fmt': 'Charging',
-            'GMV_Fmt': 'GMV',
-            'Order_Qty': 'Order Qty',
-            'Cost_Ratio_Fmt': 'Cost Ratio',
-            'AOV_Fmt': 'AOV'
+            'Store': 'Store', 'Charging_Fmt': 'Charging', 'GMV_Fmt': 'GMV',
+            'Order_Qty': 'Order Qty', 'Cost_Ratio_Fmt': 'Cost Ratio', 'AOV_Fmt': 'AOV'
         },
-        use_container_width=True,
-        hide_index=True
+        use_container_width=True, hide_index=True
     )
     
-    # Link dan Download
     st.markdown(f"📊 [Buka Data Lengkap di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
     
     csv = df_filtered.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
-        label="📥 Download Data Filtered (CSV)",
-        data=csv,
-        file_name=f"charging_analysis_{datetime.now().strftime('%Y%m%d')}.csv",
-        mime="text/csv"
+        label="📥 Download Data Filtered (CSV)", data=csv,
+        file_name=f"charging_analysis_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv"
     )
 
 # -------------------- SAVE TO GOOGLE SHEETS --------------------
@@ -629,8 +590,6 @@ elif action == "💾 Simpan ke Google Sheets":
                         st.session_state.last_update = timestamp
                 except Exception as e:
                     st.error(f"❌ Gagal menyimpan: {str(e)}")
-                    with st.expander("Detail Error"):
-                        st.code(str(e))
 
 # Footer
 st.sidebar.divider()
