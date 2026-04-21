@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import io
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -29,12 +30,14 @@ FOLDER_IDS = {
 
 # Google Sheets Config
 GOOGLE_SHEET_ID = "1KfSLfk9lkTzJhpkEpo98SBGvsi3G0R0GcM_-aWgjSh8"
-SHEET_NAME = "Master_Charging_Report"
+SHEET_MASTER = "Master_Charging_Report"
+SHEET_GMV = "Order GMV"
+SHEET_QTY = "Order Qty"
+SHEET_PCA = "Charging PCA"
 
 # -------------------- AUTHENTICATION --------------------
 @st.cache_resource
 def get_credentials():
-    """Get credentials from secrets."""
     return service_account.Credentials.from_service_account_info(
         st.secrets["gcp_service_account"],
         scopes=SCOPES
@@ -42,19 +45,16 @@ def get_credentials():
 
 @st.cache_resource
 def get_drive_service():
-    """Authenticate and return Google Drive service."""
     credentials = get_credentials()
     return build('drive', 'v3', credentials=credentials)
 
 @st.cache_resource
 def get_gsheet_client():
-    """Authenticate and return gspread client."""
     credentials = get_credentials()
     return gspread.authorize(credentials)
 
 # -------------------- HELPER FUNCTIONS --------------------
 def list_excel_files_in_folder(service, folder_id):
-    """List semua file Excel (.xlsx) di dalam folder."""
     query = f"'{folder_id}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
     results = service.files().list(
         q=query,
@@ -66,7 +66,6 @@ def list_excel_files_in_folder(service, folder_id):
     return results.get('files', [])
 
 def download_file(service, file_id):
-    """Download file from Google Drive and return as BytesIO."""
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
@@ -77,36 +76,38 @@ def download_file(service, file_id):
     return fh
 
 def process_excel(file_bytes, store_name, file_name):
-    """Extract data from 'Charging Report Summary' sheet."""
     try:
         df = pd.read_excel(file_bytes, sheet_name='Charging Report Summary', header=0)
         df = df[df['CRT ID'].notna()]
-        
         if df.empty:
             return pd.DataFrame()
-        
         df['Store'] = store_name
         df['Source File'] = file_name
-        
         if 'Waktu Periode Dimulai' in df.columns:
             df['Periode'] = pd.to_datetime(df['Waktu Periode Dimulai']).dt.to_period('M').astype(str)
-        
         return df
     except Exception as e:
         st.warning(f"⚠️ Error processing {store_name}/{file_name}: {str(e)}")
         return pd.DataFrame()
 
-def load_from_gsheet(client):
-    """Load data dari Google Sheets."""
+def load_sheet_data(client, sheet_name):
+    """Load data dari Google Sheet tertentu."""
     try:
         sheet = client.open_by_key(GOOGLE_SHEET_ID)
-        worksheet = sheet.worksheet(SHEET_NAME)
+        worksheet = sheet.worksheet(sheet_name)
         data = worksheet.get_all_records()
-        
         if data:
-            df = pd.DataFrame(data)
-            
-            # Convert numeric columns
+            return pd.DataFrame(data)
+        return pd.DataFrame()
+    except Exception as e:
+        st.warning(f"⚠️ Gagal load sheet {sheet_name}: {str(e)}")
+        return pd.DataFrame()
+
+def compile_charging_data(service, client, force_refresh=False):
+    """Compile data charging dari file Excel di Drive."""
+    if not force_refresh:
+        cached_df = load_sheet_data(client, SHEET_MASTER)
+        if not cached_df.empty:
             numeric_columns = [
                 'Total Order Sold Qty', 'Total MTSKU Sold Qty', 'Total sebelum Pajak', 'Pajak',
                 'Total setelah Pajak', 'Amount after tax (Confirmed)', 'Commission Fees',
@@ -116,57 +117,19 @@ def load_from_gsheet(client):
                 'Other Fees', 'Other Fees (Confirmed)', 'Settlement Amount'
             ]
             for col in numeric_columns:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            # Get last modified info
-            try:
-                last_updated = worksheet.acell('A1').value
-                if last_updated and last_updated.startswith('Last Updated:'):
-                    modified_time = last_updated.replace('Last Updated: ', '')
-                else:
-                    modified_time = "Unknown"
-            except:
-                modified_time = "Unknown"
-            
-            return df, modified_time
-        else:
-            return None, None
-    except gspread.exceptions.WorksheetNotFound:
-        return None, None
-    except Exception as e:
-        st.warning(f"⚠️ Gagal load dari Google Sheets: {str(e)}")
-        return None, None
+                if col in cached_df.columns:
+                    cached_df[col] = pd.to_numeric(cached_df[col], errors='coerce')
+            return cached_df
 
-def compile_all_reports(service, client, force_refresh=False):
-    """Baca semua file dari semua store, compile menjadi satu DataFrame."""
-    if not force_refresh:
-        cached_df, modified_time = load_from_gsheet(client)
-        if cached_df is not None and not cached_df.empty:
-            st.info(f"📦 Menggunakan data cache dari Google Sheets (Last Update: {modified_time})")
-            return cached_df, modified_time
-    
     all_data = []
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
-    total_files = 0
-    processed_files = 0
-    
-    for store_name, folder_id in FOLDER_IDS.items():
-        files = list_excel_files_in_folder(service, folder_id)
-        total_files += len(files)
-    
-    if total_files == 0:
-        status_text.text("⚠️ Tidak ada file Excel ditemukan.")
-        progress_bar.empty()
-        return pd.DataFrame(), None
-    
+    total_files = sum(len(list_excel_files_in_folder(service, fid)) for fid in FOLDER_IDS.values())
+    processed = 0
+
     for store_name, folder_id in FOLDER_IDS.items():
         status_text.text(f"📂 Memproses store: {store_name}...")
-        files = list_excel_files_in_folder(service, folder_id)
-        
-        for file in files:
+        for file in list_excel_files_in_folder(service, folder_id):
             try:
                 file_bytes = download_file(service, file['id'])
                 df = process_excel(file_bytes, store_name, file['name'])
@@ -174,16 +137,14 @@ def compile_all_reports(service, client, force_refresh=False):
                     all_data.append(df)
             except Exception as e:
                 st.warning(f"⚠️ Gagal download {store_name}/{file['name']}: {str(e)}")
-            
-            processed_files += 1
-            progress_bar.progress(processed_files / total_files)
-    
+            processed += 1
+            progress_bar.progress(processed / total_files)
+
     status_text.text(f"✅ Selesai memproses {total_files} file!")
     progress_bar.empty()
-    
+
     if all_data:
         compiled_df = pd.concat(all_data, ignore_index=True)
-        
         numeric_columns = [
             'Total Order Sold Qty', 'Total MTSKU Sold Qty', 'Total sebelum Pajak', 'Pajak',
             'Total setelah Pajak', 'Amount after tax (Confirmed)', 'Commission Fees',
@@ -195,52 +156,96 @@ def compile_all_reports(service, client, force_refresh=False):
         for col in numeric_columns:
             if col in compiled_df.columns:
                 compiled_df[col] = pd.to_numeric(compiled_df[col], errors='coerce')
-        
-        return compiled_df, None
-    else:
-        return pd.DataFrame(), None
+        return compiled_df
+    return pd.DataFrame()
 
-def save_to_gsheet(client, df):
-    """Simpan DataFrame ke Google Sheets."""
-    try:
-        sheet = client.open_by_key(GOOGLE_SHEET_ID)
-        
-        # Coba dapatkan worksheet, buat jika belum ada
-        try:
-            worksheet = sheet.worksheet(SHEET_NAME)
-            worksheet.clear()
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet = sheet.add_worksheet(
-                title=SHEET_NAME,
-                rows=max(1000, len(df)+10),
-                cols=max(30, len(df.columns)+5)
-            )
-        
-        # Update timestamp
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        worksheet.update('A1', [[f'Last Updated: {timestamp}']], value_input_option='USER_ENTERED')
-        
-        # Siapkan data
-        df_clean = df.fillna('')
-        headers = df_clean.columns.tolist()
-        
-        data = [headers]
-        for _, row in df_clean.iterrows():
-            row_list = [str(val) if str(val) != 'nan' else '' for val in row.tolist()]
-            data.append(row_list)
-        
-        # Update data
-        if data:
-            worksheet.update('A2', data, value_input_option='USER_ENTERED')
-        
-        # Format header
-        if headers:
-            end_col_letter = chr(65 + min(len(headers), 26) - 1) if len(headers) <= 26 else 'Z'
-            worksheet.format(f'A2:{end_col_letter}2', {"textFormat": {"bold": True}})
-        
-        return True, timestamp
-    except Exception as e:
-        raise e
+def transform_monthly_sheet(df, value_name):
+    """Transform sheet GMV/Qty dari wide ke long format."""
+    if df.empty:
+        return pd.DataFrame()
+    
+    # Kolom bulan yang valid (Jan 26, Feb 26, ..., Dec 26)
+    month_cols = [col for col in df.columns if col not in ['Store', 'Description']]
+    
+    df_melted = df.melt(
+        id_vars=['Store'],
+        value_vars=month_cols,
+        var_name='Month',
+        value_name=value_name
+    )
+    
+    # Konversi Month ke format periode yang sama dengan charging (2026-01, 2026-02, ...)
+    month_map = {
+        'Jan 26': '2026-01', 'Feb 26': '2026-02', 'Mar 26': '2026-03',
+        'Apr 26': '2026-04', 'May 26': '2026-05', 'Jun 26': '2026-06',
+        'Jul 26': '2026-07', 'Aug 26': '2026-08', 'Sep 26': '2026-09',
+        'Oct 26': '2026-10', 'Nov 26': '2026-11', 'Dec 26': '2026-12'
+    }
+    df_melted['Periode'] = df_melted['Month'].map(month_map)
+    df_melted = df_melted.dropna(subset=['Periode'])
+    
+    return df_melted[['Store', 'Periode', value_name]]
+
+def transform_pca_charging(df_pca):
+    """Transform sheet Charging PCA ke format long."""
+    if df_pca.empty:
+        return pd.DataFrame()
+    
+    # Filter hanya baris "Charging PCA"
+    pca_row = df_pca[df_pca['Description'] == 'Charging PCA']
+    if pca_row.empty:
+        return pd.DataFrame()
+    
+    month_cols = [col for col in df_pca.columns if col != 'Description']
+    df_melted = pca_row.melt(
+        var_name='Month',
+        value_name='Charging'
+    )
+    
+    month_map = {
+        'Jan 26': '2026-01', 'Feb 26': '2026-02', 'Mar 26': '2026-03',
+        'Apr 26': '2026-04', 'May 26': '2026-05', 'Jun 26': '2026-06',
+        'Jul 26': '2026-07', 'Aug 26': '2026-08', 'Sep 26': '2026-09',
+        'Oct 26': '2026-10', 'Nov 26': '2026-11', 'Dec 26': '2026-12'
+    }
+    df_melted['Periode'] = df_melted['Month'].map(month_map)
+    df_melted['Store'] = 'PCA'
+    df_melted = df_melted.dropna(subset=['Periode'])
+    
+    return df_melted[['Store', 'Periode', 'Charging']]
+
+def build_combined_dataset(charging_df, gmv_df, qty_df, pca_charging_df):
+    """Gabungkan semua data menjadi satu dataset untuk visualisasi."""
+    if charging_df.empty:
+        return pd.DataFrame()
+    
+    # Agregasi charging per Store & Periode
+    charging_agg = charging_df.groupby(['Store', 'Periode']).agg({
+        'Amount after tax (Confirmed)': 'sum'
+    }).reset_index()
+    charging_agg.rename(columns={'Amount after tax (Confirmed)': 'Charging'}, inplace=True)
+    
+    # Filter hanya periode 2026
+    charging_agg = charging_agg[charging_agg['Periode'].str.startswith('2026')]
+    
+    # Transform GMV dan Qty
+    gmv_long = transform_monthly_sheet(gmv_df, 'GMV')
+    qty_long = transform_monthly_sheet(qty_df, 'Order_Qty')
+    
+    # Gabungkan semua
+    combined = charging_agg.merge(gmv_long, on=['Store', 'Periode'], how='left')
+    combined = combined.merge(qty_long, on=['Store', 'Periode'], how='left')
+    
+    # Tambahkan data PCA charging
+    if not pca_charging_df.empty:
+        combined = pd.concat([combined, pca_charging_df], ignore_index=True)
+    
+    # Hitung metrik turunan
+    combined['Cost_Ratio_%'] = (combined['Charging'] / combined['GMV']) * 100
+    combined['AOV'] = combined['GMV'] / combined['Order_Qty']
+    combined['Charging_per_Order'] = combined['Charging'] / combined['Order_Qty']
+    
+    return combined
 
 def format_rupiah(value):
     try:
@@ -248,16 +253,17 @@ def format_rupiah(value):
     except:
         return "Rp 0"
 
-# -------------------- MAIN APP --------------------
-if 'compiled_df' not in st.session_state:
-    st.session_state.compiled_df = None
-if 'last_update' not in st.session_state:
-    st.session_state.last_update = None
+def format_percent(value):
+    try:
+        return f"{float(value):.2f}%"
+    except:
+        return "N/A"
 
+# -------------------- MAIN APP --------------------
 st.sidebar.header("⚙️ Kontrol")
 action = st.sidebar.radio(
     "📌 Pilih Aksi",
-    ["📥 Load & Compile Data", "📊 Lihat Dashboard", "💾 Simpan ke Google Sheets"]
+    ["📥 Load & Compile Data", "📊 Lihat Dashboard"]
 )
 
 try:
@@ -271,186 +277,211 @@ except Exception as e:
 if action == "📥 Load & Compile Data":
     st.header("📥 Load & Compile Data dari Google Drive")
     
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        force_refresh = st.checkbox("🔄 Force Refresh (abaikan cache)", value=False)
-    with col2:
-        if st.session_state.compiled_df is not None:
-            st.metric("Data di Memory", f"{len(st.session_state.compiled_df):,} baris")
+    force_refresh = st.checkbox("🔄 Force Refresh (abaikan cache)", value=True)
     
     if st.button("🚀 Mulai Compile Semua Report", type="primary", use_container_width=True):
         with st.spinner("🔄 Membaca dan memproses semua file Excel..."):
-            compiled_df, cache_time = compile_all_reports(service, gsheet_client, force_refresh=force_refresh)
+            charging_df = compile_charging_data(service, gsheet_client, force_refresh=force_refresh)
             
-            if not compiled_df.empty:
-                st.session_state.compiled_df = compiled_df
-                st.session_state.last_update = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                st.success(f"✅ Berhasil compile {len(compiled_df):,} baris data!")
-                st.subheader("📋 Preview Data Hasil Compile")
-                st.dataframe(compiled_df.head(10), use_container_width=True)
-                
-                st.subheader("📊 Ringkasan Dataset")
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Total Baris", f"{len(compiled_df):,}")
-                with col2:
-                    st.metric("Total Store", compiled_df['Store'].nunique())
-                with col3:
-                    st.metric("Total File", compiled_df['Source File'].nunique())
-                with col4:
-                    if 'Periode' in compiled_df.columns:
-                        st.metric("Periode", ", ".join(compiled_df['Periode'].unique()))
-                
-                st.subheader("🏪 Data per Store")
-                store_summary = compiled_df.groupby('Store').agg({
-                    'Total setelah Pajak': 'sum',
-                    'Settlement Amount': 'sum',
-                    'Source File': 'nunique'
-                }).reset_index()
-                store_summary.columns = ['Store', 'Total Setelah Pajak', 'Settlement Amount', 'Jumlah File']
-                
-                store_summary['Total Setelah Pajak'] = store_summary['Total Setelah Pajak'].apply(format_rupiah)
-                store_summary['Settlement Amount'] = store_summary['Settlement Amount'].apply(format_rupiah)
-                
-                st.dataframe(store_summary, use_container_width=True)
+            if not charging_df.empty:
+                st.session_state.charging_df = charging_df
+                st.success(f"✅ Berhasil compile {len(charging_df):,} baris data charging!")
+                st.dataframe(charging_df.head(10), use_container_width=True)
             else:
-                st.warning("⚠️ Tidak ada data yang berhasil di-compile.")
+                st.warning("⚠️ Tidak ada data charging yang berhasil di-compile.")
 
 # -------------------- DASHBOARD --------------------
 elif action == "📊 Lihat Dashboard":
     st.header("📊 Dashboard Charging Report")
     
-    if st.session_state.compiled_df is None:
-        with st.spinner("📦 Mencoba load data dari Google Sheets..."):
-            compiled_df, cache_time = compile_all_reports(service, gsheet_client, force_refresh=False)
-            if not compiled_df.empty:
-                st.session_state.compiled_df = compiled_df
-                st.info(f"📦 Data dimuat dari Google Sheets (Last Update: {cache_time})")
-            else:
-                st.warning("⚠️ Tidak ada data. Silakan Load & Compile terlebih dahulu.")
-                st.stop()
+    # Load semua data dari Google Sheets
+    with st.spinner("📦 Memuat data dari Google Sheets..."):
+        charging_df = load_sheet_data(gsheet_client, SHEET_MASTER)
+        gmv_df = load_sheet_data(gsheet_client, SHEET_GMV)
+        qty_df = load_sheet_data(gsheet_client, SHEET_QTY)
+        pca_df = load_sheet_data(gsheet_client, SHEET_PCA)
     
-    df = st.session_state.compiled_df.copy()
+    if charging_df.empty:
+        st.warning("⚠️ Data charging belum tersedia. Silakan Load & Compile terlebih dahulu.")
+        st.stop()
     
+    # Transform dan gabungkan data
+    pca_charging = transform_pca_charging(pca_df)
+    combined_df = build_combined_dataset(charging_df, gmv_df, qty_df, pca_charging)
+    
+    if combined_df.empty:
+        st.warning("⚠️ Data gabungan kosong. Periksa sheet GMV dan Qty.")
+        st.stop()
+    
+    # Filter sidebar
     st.sidebar.subheader("🔍 Filter Data")
-    
     stores = st.sidebar.multiselect(
         "Pilih Store",
-        options=sorted(df['Store'].unique()),
-        default=sorted(df['Store'].unique())
+        options=sorted(combined_df['Store'].unique()),
+        default=sorted(combined_df['Store'].unique())
+    )
+    periods = st.sidebar.multiselect(
+        "Pilih Periode",
+        options=sorted(combined_df['Periode'].unique()),
+        default=sorted(combined_df['Periode'].unique())
     )
     
-    if 'Periode' in df.columns:
-        periods = st.sidebar.multiselect(
-            "Pilih Periode",
-            options=sorted(df['Periode'].unique()),
-            default=sorted(df['Periode'].unique())
-        )
-        df_filtered = df[df['Store'].isin(stores) & df['Periode'].isin(periods)]
-    else:
-        df_filtered = df[df['Store'].isin(stores)]
+    df_filtered = combined_df[
+        combined_df['Store'].isin(stores) & 
+        combined_df['Periode'].isin(periods)
+    ]
     
     if df_filtered.empty:
         st.warning("⚠️ Tidak ada data dengan filter yang dipilih.")
         st.stop()
     
-    st.caption(f"Menampilkan {len(df_filtered):,} baris data")
-    
-    st.subheader("💰 Ringkasan Keuangan")
-    col1, col2, col3, col4 = st.columns(4)
+    # KPI Cards
+    st.subheader("💰 Key Metrics")
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        total_sales = df_filtered['Total setelah Pajak'].sum() if 'Total setelah Pajak' in df_filtered.columns else 0
-        st.metric("Total Setelah Pajak", format_rupiah(total_sales))
+        total_charging = df_filtered['Charging'].sum()
+        st.metric("Total Charging", format_rupiah(total_charging))
     
     with col2:
-        total_commission = df_filtered['Commission Fees (Confirmed)'].sum() if 'Commission Fees (Confirmed)' in df_filtered.columns else 0
-        st.metric("Commission Fees", format_rupiah(total_commission))
+        total_gmv = df_filtered['GMV'].sum()
+        st.metric("Total GMV", format_rupiah(total_gmv))
     
     with col3:
-        total_settlement = df_filtered['Settlement Amount'].sum() if 'Settlement Amount' in df_filtered.columns else 0
-        st.metric("Settlement Amount", format_rupiah(total_settlement))
+        avg_cost_ratio = df_filtered['Cost_Ratio_%'].mean()
+        st.metric("Avg Cost Ratio", format_percent(avg_cost_ratio))
     
     with col4:
-        total_orders = df_filtered['Total Order Sold Qty'].sum() if 'Total Order Sold Qty' in df_filtered.columns else 0
-        st.metric("Total Order", f"{total_orders:,.0f}")
+        total_orders = df_filtered['Order_Qty'].sum()
+        st.metric("Total Orders", f"{total_orders:,.0f}")
     
-    st.subheader("📈 Analisis per Store")
+    with col5:
+        avg_aov = df_filtered['AOV'].mean()
+        st.metric("Avg AOV", format_rupiah(avg_aov))
+    
+    # Charts Row 1
+    st.subheader("📈 Charging vs GMV per Store")
+    
+    # Agregasi per Store
+    store_summary = df_filtered.groupby('Store').agg({
+        'Charging': 'sum',
+        'GMV': 'sum',
+        'Order_Qty': 'sum',
+        'Cost_Ratio_%': 'mean'
+    }).reset_index()
+    
     col1, col2 = st.columns(2)
     
     with col1:
-        if 'Total setelah Pajak' in df_filtered.columns:
-            store_total = df_filtered.groupby('Store')['Total setelah Pajak'].sum().reset_index()
-            fig1 = px.bar(store_total, x='Store', y='Total setelah Pajak', title="Total Setelah Pajak per Store", color='Store', text_auto='.2s')
-            fig1.update_layout(showlegend=False)
-            st.plotly_chart(fig1, use_container_width=True)
+        fig1 = px.bar(
+            store_summary,
+            x='Store',
+            y=['Charging', 'GMV'],
+            title="Charging vs GMV per Store",
+            barmode='group',
+            text_auto='.2s'
+        )
+        st.plotly_chart(fig1, use_container_width=True)
     
     with col2:
-        if 'Settlement Amount' in df_filtered.columns:
-            store_settlement = df_filtered.groupby('Store')['Settlement Amount'].sum().reset_index()
-            fig2 = px.bar(store_settlement, x='Store', y='Settlement Amount', title="Settlement Amount per Store", color='Store', text_auto='.2s')
-            fig2.update_layout(showlegend=False)
-            st.plotly_chart(fig2, use_container_width=True)
+        fig2 = px.bar(
+            store_summary,
+            x='Store',
+            y='Cost_Ratio_%',
+            title="Cost Ratio (%) per Store",
+            color='Store',
+            text_auto='.2f'
+        )
+        fig2.update_layout(showlegend=False)
+        st.plotly_chart(fig2, use_container_width=True)
     
+    # Charts Row 2
+    st.subheader("📉 Tren Bulanan")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Tren Cost Ratio per Store
+        fig3 = px.line(
+            df_filtered,
+            x='Periode',
+            y='Cost_Ratio_%',
+            color='Store',
+            markers=True,
+            title="Tren Cost Ratio (%) per Store"
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+    
+    with col2:
+        # Tren Charging vs GMV
+        monthly_trend = df_filtered.groupby('Periode').agg({
+            'Charging': 'sum',
+            'GMV': 'sum'
+        }).reset_index()
+        
+        fig4 = go.Figure()
+        fig4.add_trace(go.Bar(
+            x=monthly_trend['Periode'],
+            y=monthly_trend['GMV'],
+            name='GMV',
+            yaxis='y2'
+        ))
+        fig4.add_trace(go.Scatter(
+            x=monthly_trend['Periode'],
+            y=monthly_trend['Charging'],
+            name='Charging',
+            mode='lines+markers',
+            line=dict(color='red', width=3)
+        ))
+        fig4.update_layout(
+            title="Tren Bulanan: Charging vs GMV",
+            yaxis=dict(title="Charging (Rp)"),
+            yaxis2=dict(title="GMV (Rp)", overlaying='y', side='right'),
+            legend=dict(x=0.01, y=0.99)
+        )
+        st.plotly_chart(fig4, use_container_width=True)
+    
+    # Scatter Plot: GMV vs Charging
+    st.subheader("🔵 Korelasi GMV vs Charging")
+    fig5 = px.scatter(
+        df_filtered,
+        x='GMV',
+        y='Charging',
+        color='Store',
+        size='Order_Qty',
+        hover_data=['Periode', 'Cost_Ratio_%'],
+        title="GMV vs Charging (ukuran bubble = Order Qty)"
+    )
+    st.plotly_chart(fig5, use_container_width=True)
+    
+    # Tabel Insight
+    st.subheader("📋 Tabel Insight per Store")
+    
+    insight_df = store_summary.copy()
+    insight_df['Charging'] = insight_df['Charging'].apply(format_rupiah)
+    insight_df['GMV'] = insight_df['GMV'].apply(format_rupiah)
+    insight_df['Cost_Ratio_%'] = insight_df['Cost_Ratio_%'].apply(format_percent)
+    insight_df['AOV'] = (insight_df['GMV'].str.replace('Rp ', '').str.replace(',', '').astype(float) / insight_df['Order_Qty']).apply(format_rupiah)
+    
+    st.dataframe(
+        insight_df[['Store', 'Charging', 'GMV', 'Order_Qty', 'Cost_Ratio_%', 'AOV']],
+        use_container_width=True,
+        hide_index=True
+    )
+    
+    # Link ke Google Sheets
     st.markdown(f"📊 [Buka Data Lengkap di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
     
+    # Download button
     csv = df_filtered.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
         label="📥 Download Data Filtered (CSV)",
         data=csv,
-        file_name=f"charging_report_filtered_{datetime.now().strftime('%Y%m%d')}.csv",
+        file_name=f"charging_analysis_{datetime.now().strftime('%Y%m%d')}.csv",
         mime="text/csv"
     )
 
-# -------------------- SAVE TO GOOGLE SHEETS --------------------
-elif action == "💾 Simpan ke Google Sheets":
-    st.header("💾 Simpan Hasil Compile ke Google Sheets")
-    
-    if st.session_state.compiled_df is None:
-        st.warning("⚠️ Tidak ada data untuk disimpan. Silakan Load & Compile terlebih dahulu.")
-    else:
-        df = st.session_state.compiled_df
-        st.info(f"📊 Data yang akan disimpan: **{len(df):,} baris**, **{df['Store'].nunique()} store**")
-        st.text(f"📁 Google Sheet ID: `{GOOGLE_SHEET_ID}`")
-        st.text(f"📄 Sheet Name: `{SHEET_NAME}`")
-        
-        st.markdown(f"[📊 Buka Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
-        
-        if st.button("📤 Simpan ke Google Sheets", type="primary", use_container_width=True):
-            with st.spinner("🔄 Menyimpan data ke Google Sheets..."):
-                try:
-                    success, timestamp = save_to_gsheet(gsheet_client, df)
-                    
-                    if success:
-                        st.success(f"✅ Data berhasil disimpan ke Google Sheets!")
-                        st.info(f"🕒 Last Updated: {timestamp}")
-                        st.markdown(f"[📊 Lihat Hasil di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
-                        st.session_state.last_update = timestamp
-                        
-                except Exception as e:
-                    st.error(f"❌ Gagal menyimpan ke Google Sheets: {str(e)}")
-                    
-                    with st.expander("Detail Error"):
-                        st.code(str(e))
-                    
-                    st.warning("Silakan download manual sebagai alternatif:")
-                    csv_download = df.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button(
-                        label="📥 Download CSV (Manual)",
-                        data=csv_download,
-                        file_name="Master_Charging_Report.csv",
-                        mime="text/csv"
-                    )
-
 # Footer
 st.sidebar.divider()
-if st.session_state.last_update:
-    st.sidebar.caption(f"🕒 Data terakhir di-load: {st.session_state.last_update}")
-if st.session_state.compiled_df is not None:
-    st.sidebar.caption(f"📊 {len(st.session_state.compiled_df):,} baris di memory")
-
-st.sidebar.divider()
-st.sidebar.caption("📌 Sheet yang dibaca: Charging Report Summary")
-st.sidebar.caption(f"📁 Total folder store: {len(FOLDER_IDS)}")
-st.sidebar.caption(f"📊 Output: Google Sheets")
+st.sidebar.caption("📌 Data source: Google Sheets")
+st.sidebar.caption(f"📊 Total store: {len(FOLDER_IDS) + 1} (termasuk PCA)")
