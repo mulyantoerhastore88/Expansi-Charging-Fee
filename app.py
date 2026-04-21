@@ -241,6 +241,20 @@ def transform_pca_charging(df_pca):
     
     return df_melted[['Store', 'Periode', 'Charging']]
 
+def convert_periode(p):
+    """Konversi periode dari berbagai format ke 'Jan 26'."""
+    try:
+        if isinstance(p, str):
+            # Jika format "2025-04" atau "2026-01"
+            if '-' in p and p[0].isdigit():
+                dt = pd.to_datetime(p)
+                return dt.strftime('%b %y')
+            # Jika sudah format "Apr 25" atau "Jan 26", return apa adanya
+            return p
+        return str(p)
+    except:
+        return str(p)
+
 def build_combined_dataset(charging_df, gmv_df, qty_df, pca_charging_df):
     """Gabungkan semua data menjadi satu dataset."""
     if charging_df.empty:
@@ -257,30 +271,19 @@ def build_combined_dataset(charging_df, gmv_df, qty_df, pca_charging_df):
     
     charging_df[amount_col] = pd.to_numeric(charging_df[amount_col], errors='coerce')
     
-    # KONVERSI PERIODE: dari "2025-04" ke "Apr 25", "2026-01" ke "Jan 26"
-    def convert_periode(p):
-        try:
-            # Jika format "2025-04"
-            if isinstance(p, str) and '-' in p and p[0].isdigit():
-                dt = pd.to_datetime(p)
-                return dt.strftime('%b %y')
-            # Jika sudah format "Apr 25" atau "Jan 26"
-            return p
-        except:
-            return p
-    
+    # Konversi periode ke format "Jan 26"
     charging_df['Periode_Converted'] = charging_df[periode_col].apply(convert_periode)
     
-    # Agregasi dengan periode yang sudah dikonversi
+    # Agregasi
     charging_agg = charging_df.groupby([store_col, 'Periode_Converted']).agg({
         amount_col: 'sum'
     }).reset_index()
     
     charging_agg.rename(columns={amount_col: 'Charging', store_col: 'Store', 'Periode_Converted': 'Periode'}, inplace=True)
     
-    # DEBUG
-    st.write("🔍 Periode setelah konversi:", charging_agg['Periode'].unique().tolist())
-    
+    if charging_agg.empty:
+        st.warning("⚠️ Tidak ada data charging")
+        return pd.DataFrame()
     
     # Transform GMV dan Qty
     gmv_long = transform_monthly_sheet(gmv_df, 'GMV')
@@ -413,7 +416,6 @@ elif action == "📊 Lihat Dashboard":
     # Debug info
     with st.expander("🔍 Debug Info", expanded=False):
         st.write("Charging DF shape:", charging_df.shape)
-        st.write("Charging DF columns:", charging_df.columns.tolist())
         st.write("GMV DF shape:", gmv_df.shape)
         st.write("Qty DF shape:", qty_df.shape)
         st.write("PCA DF shape:", pca_df.shape)
@@ -432,10 +434,13 @@ elif action == "📊 Lihat Dashboard":
         options=sorted(combined_df['Store'].unique()),
         default=sorted(combined_df['Store'].unique())
     )
+    
+    # Dapatkan periode yang tersedia
+    available_periods = sorted(combined_df['Periode'].unique())
     periods = st.sidebar.multiselect(
         "Pilih Periode",
-        options=[p for p in MONTH_ORDER if p in combined_df['Periode'].unique()],
-        default=[p for p in MONTH_ORDER if p in combined_df['Periode'].unique()]
+        options=available_periods,
+        default=available_periods
     )
     
     df_filtered = combined_df[
@@ -494,20 +499,23 @@ elif action == "📊 Lihat Dashboard":
     col1, col2 = st.columns(2)
     
     with col1:
-        # Urutkan berdasarkan MONTH_ORDER
-        df_filtered['Periode'] = pd.Categorical(df_filtered['Periode'], categories=MONTH_ORDER, ordered=True)
+        # Urutkan berdasarkan MONTH_ORDER untuk yang ada di data
+        valid_months = [m for m in MONTH_ORDER if m in df_filtered['Periode'].unique()]
+        if valid_months:
+            df_filtered['Periode'] = pd.Categorical(df_filtered['Periode'], categories=valid_months, ordered=True)
         df_sorted = df_filtered.sort_values('Periode')
         
         fig3 = px.line(
             df_sorted, x='Periode', y='Cost_Ratio_%', color='Store',
             markers=True, title="Tren Cost Ratio (%) per Store"
         )
-        fig3.update_xaxis(type='category', tickangle=-45)
+        fig3.update_xaxes(type='category', tickangle=-45)
         st.plotly_chart(fig3, use_container_width=True)
     
     with col2:
         monthly_trend = df_filtered.groupby('Periode', observed=False).agg({'Charging': 'sum', 'GMV': 'sum'}).reset_index()
-        monthly_trend['Periode'] = pd.Categorical(monthly_trend['Periode'], categories=MONTH_ORDER, ordered=True)
+        if valid_months:
+            monthly_trend['Periode'] = pd.Categorical(monthly_trend['Periode'], categories=valid_months, ordered=True)
         monthly_trend = monthly_trend.sort_values('Periode')
         
         fig4 = go.Figure()
@@ -524,9 +532,9 @@ elif action == "📊 Lihat Dashboard":
             title="Tren Bulanan: Charging vs GMV",
             yaxis=dict(title="Charging (Rp)"),
             yaxis2=dict(title="GMV (Rp)", overlaying='y', side='right'),
-            legend=dict(x=0.01, y=0.99),
-            xaxis=dict(type='category', tickangle=-45)
+            legend=dict(x=0.01, y=0.99)
         )
+        fig4.update_xaxes(type='category', tickangle=-45)
         st.plotly_chart(fig4, use_container_width=True)
     
     # Scatter Plot
@@ -538,6 +546,9 @@ elif action == "📊 Lihat Dashboard":
             scatter_df['Order_Qty'] = 1
         else:
             scatter_df['Order_Qty'] = pd.to_numeric(scatter_df['Order_Qty'], errors='coerce').fillna(1).clip(lower=1)
+        
+        if 'Cost_Ratio_%' not in scatter_df.columns:
+            scatter_df['Cost_Ratio_%'] = 0
         
         try:
             fig5 = px.scatter(
@@ -567,18 +578,25 @@ elif action == "📊 Lihat Dashboard":
     st.dataframe(
         insight_df[['Store', 'Charging_Fmt', 'GMV_Fmt', 'Order_Qty', 'Cost_Ratio_Fmt', 'AOV_Fmt']],
         column_config={
-            'Store': 'Store', 'Charging_Fmt': 'Charging', 'GMV_Fmt': 'GMV',
-            'Order_Qty': 'Order Qty', 'Cost_Ratio_Fmt': 'Cost Ratio', 'AOV_Fmt': 'AOV'
+            'Store': 'Store',
+            'Charging_Fmt': 'Charging',
+            'GMV_Fmt': 'GMV',
+            'Order_Qty': 'Order Qty',
+            'Cost_Ratio_Fmt': 'Cost Ratio',
+            'AOV_Fmt': 'AOV'
         },
-        use_container_width=True, hide_index=True
+        use_container_width=True,
+        hide_index=True
     )
     
     st.markdown(f"📊 [Buka Data Lengkap di Google Sheets](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
     
     csv = df_filtered.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
-        label="📥 Download Data Filtered (CSV)", data=csv,
-        file_name=f"charging_analysis_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv"
+        label="📥 Download Data Filtered (CSV)",
+        data=csv,
+        file_name=f"charging_analysis_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv"
     )
 
 # -------------------- SAVE TO GOOGLE SHEETS --------------------
